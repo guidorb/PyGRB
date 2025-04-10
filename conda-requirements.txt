@@ -1,0 +1,13 @@
+numpy
+matplotlib
+astropy
+tqdm
+glob
+pickle
+uncertainties
+scipy
+ipywidgets
+os
+random
+copy
+extinction
