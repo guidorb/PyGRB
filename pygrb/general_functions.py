@@ -6,7 +6,6 @@ from astropy.cosmology import WMAP9 as cosmo
 from time import sleep
 # from tqdm import tqdm
 from tqdm import tqdm_notebook as tqdm
-from astropy import units as u
 from astropy.coordinates import SkyCoord, Distance
 from uncertainties import ufloat
 from uncertainties import unumpy as unp
@@ -15,6 +14,8 @@ from astropy.io import ascii
 from astropy.io import fits as pyfits
 import pickle
 from . import analysis_functions as af
+from astropy.nddata import Cutout2D
+from astropy.wcs import WCS
 
 
 # def load_jewels(import_catalog=True, import_spectra=False):
@@ -33,19 +34,19 @@ from . import analysis_functions as af
 class load_jewels:
 	def __init__(self):
 		self.tab = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full.dat')
-		self.spectra = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_29March2025_full.p', "rb"), encoding='latin1')
+		self.spectra = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_18April2025_full.p', "rb"), encoding='latin1')
 		self.coords = SkyCoord(self.tab['ra'], self.tab['dec'], unit=(u.deg,u.deg))
 		self.line_fluxes = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full_linefluxes.cat')
 
 		f = pyfits.open('/Users/guidorb/Dropbox/Catalogs/Astrodeep/AllFields_optap.fits')
-		self.phot = f[1].copy()
+		self.astrodeep = f[1].data.copy()
+		self.astrodeep_coords = SkyCoord(f[1].data['RA'], f[1].data['DEC'], unit=(u.deg,u.deg))
 		f.close()
 
 		f = pyfits.open('/Users/guidorb/Dropbox/Catalogs/Astrodeep/AllFields_photoz.fits')
-		self.zphot = f[1].copy()
+		self.astrodeep_zphot = f[1].data.copy()
 		f.close()
 
-		self.phot_coords = SkyCoord(self.phot.data['RA'], self.phot.data['DEC'], unit=(u.deg,u.deg))
 
 	def plot_prism_spectrum(self, msaid, **kwargs):
 		af.plot_prism_spectrum(self.spectra, msaid, **kwargs)
@@ -86,11 +87,11 @@ class load_jewels:
 			flux = unp.nominal_values(flux)
 			return lam, flux, err
 
-	def match_with_jewels(self, coord, unit='deg', sep=0.015):
+	def match_with_jewels(self, coord_str, unit='deg', sep=0.015):
 		if unit=='deg':
-			c = SkyCoord(coord, unit=(u.deg,u.deg))
+			c = SkyCoord(coord_str, unit=(u.deg,u.deg))
 		elif unit=='hour':
-			c = SkyCoord(coord, unit=(u.hour,u.deg))
+			c = SkyCoord(coord_str, unit=(u.hour,u.deg))
 		
 		seps = c.separation(self.coords).arcsec
 		i = np.where(seps < sep)[0]
@@ -112,6 +113,18 @@ class load_jewels:
 				f.write('%0.5f %0.5f %0.5f\n'%(lam[i],flux[i],err[i]))
 		f.close()
 		print(f'Written to file: ./{msaid}_nirspec_prism.txt')
+
+	def get_entry(self, msaid, with_header=False):
+		try:
+			i = np.where(self.tab['msaid'] == msaid)[0][0]
+			ra, dec, z, mu, AB = self.tab['ra'][i], self.tab['dec'][i], self.tab['z'][i], self.tab['mu'][i], self.tab['AB'][i]
+			if with_header==True:
+				print('MSA-ID Ra Dec zspec AB mu')
+				print('--------------------------')
+			print(msaid, '%0.5f %0.5f %0.3f %0.1f %0.1f'%(ra, dec, z, AB, mu))
+		except:
+			print('This MSA-ID entry does not exist.')
+
 
 
 
@@ -235,7 +248,7 @@ def flux_to_AB(flux, flux_err=None, unit='jy'):
 		if np.size(flux) == 1:
 			fluxpoint = ufloat(flux, flux_err)
 		else:
-			fluxpoint = unp.uarray([flux, flux_err])
+			fluxpoint = unp.uarray(flux, flux_err)
 	else:
 		fluxpoint = flux
 
@@ -888,3 +901,43 @@ def plot_filters(filt='all', z=7.):
 
 	plt.tight_layout()
 	plt.show()
+
+
+def make_cutout(input_fits, output_fits, ra, dec, size_arcsec, plot_cutout=False, clim=None):
+	# Open the FITS file
+	with pyfits.open(input_fits) as hdul:
+		data = hdul[0].data
+		header = hdul[0].header
+		wcs = WCS(header)
+
+		# Convert size from arcsec to degrees
+		size = (size_arcsec * u.arcsec).to(u.deg)
+
+		# Define the center using SkyCoord
+		center = SkyCoord(ra=ra, dec=dec, unit=(u.deg,u.deg), frame='fk5')
+
+		# Create the cutout
+		cutout = Cutout2D(data, position=center, size=size, wcs=wcs, copy=True)
+
+		# Update the header with the cutout WCS
+		new_header = cutout.wcs.to_header()
+		for key in new_header:
+			header[key] = new_header[key]
+
+		# Replace data with the cutout and write new FITS
+		hdul[0].data = cutout.data
+		hdul[0].header = header
+		hdul.writeto(output_fits, overwrite=True)
+
+		print(f"Cutout saved to: {output_fits}")
+
+		if plot_cutout==True:
+			img = pyfits.getdata(output_fits)
+			plt.figure(figsize=(5, 5))
+			if clim==None:
+				plt.imshow(img, origin='lower')
+			else:
+				plt.imshow(img, origin='lower', clim=(clim[0],clim[1]))
+			plt.axis('off')
+			plt.title('RGB Composite from HST Images')
+			plt.show()

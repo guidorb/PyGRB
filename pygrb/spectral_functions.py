@@ -69,7 +69,10 @@ class LineFitting:
 		else:
 			jewels = gf.load_jewels()
 			i = np.where(jewels.tab['msaid'] == msaid_prism)[0][0]
-			self.z = jewels.tab['z'][i]
+			if z==None:
+				self.z = jewels.tab['z'][i]
+			else:
+				self.z = z
 
 			idx = np.where((np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['lam'])==True) | 
 							(np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['flux'])==True) | 
@@ -130,13 +133,14 @@ class LineFitting:
 			xfit, yfit, efit = self.lam[ifit], self.flux[ifit], self.err[ifit]
 
 			# Define the model
-			fit_model = models.Gaussian1D(amplitude=np.nanmax(yfit), mean=zline, stddev=20.) + models.Linear1D(slope=0., intercept=0.)
+			fit_model = models.Gaussian1D(amplitude=np.nanmax(yfit), mean=zline, stddev=60.) + models.Linear1D(slope=0., intercept=0.)
 			fit_model.amplitude_0.min = 0.
 			fit_model.amplitude_0.max = np.nanmax(yfit)
 			fit_model.amplitude_0.fixed = False
 			fit_model.stddev_0.min = 0.
+			# fit_model.stddev_0.max = 500.
 			fit_model.stddev_0.fixed = False
-			fit_model.slope_1.fixed = True
+			fit_model.slope_1.fixed = False
 
 			if len(fit_params) > 0:
 				for arg in fit_params:
@@ -154,16 +158,11 @@ class LineFitting:
 			gauss = fit_func(fit_model, xfit, yfit, weights=1./efit, maxiter=9999999)
 
 			model50 = gauss.copy()
-			# model84 = gauss.copy()
-			# model16 = gauss.copy()
-
-			# for i, nm in enumerate(gauss.param_names):
-			# 	setattr(model84, nm, getattr(gauss, nm) + fit_func.fit_info['param_cov'][i, i]**0.5)
-			# 	setattr(model16, nm, getattr(gauss, nm) - fit_func.fit_info['param_cov'][i, i]**0.5)
-
-			# evaluated16 = model16(xfit)
-			evaluated50 = model50(xfit)
-			# evaluated84 = model84(xfit)
+			evaluated50 = gauss(xfit)
+			f_gauss = models.Gaussian1D(amplitude=gauss.amplitude_0.value, mean=gauss.mean_0.value, stddev=gauss.stddev_0.value)
+			evaluated_gaussian = f_gauss(xfit)
+			f_cont = models.Linear1D(slope=gauss.slope_1.value, intercept=gauss.intercept_1.value)
+			evaluated_continuum = f_cont(xfit)
 
 			dx = np.diff(xfit)
 			dx = np.concatenate([dx,[dx[-1]]])
@@ -174,35 +173,41 @@ class LineFitting:
 			# line_flux_err = np.mean([line_flux84-line_flux50,line_flux50-line_flux16])
 			# line_flux = ufloat(line_flux50, line_flux_err)
 
-			line_flux = np.nansum(unp.uarray(evaluated50, efit) * normval * dx)
+			# line_flux = np.nansum(unp.uarray(evaluated50, efit) * normval * dx)
+
+			line_flux = np.nansum(unp.uarray(evaluated_gaussian, efit) * normval * dx)
+			ew = line_flux / (evaluated_continuum[gf.find_nearest(xfit, gauss.mean_0.value)]*normval)
+			ew0 = ew / (1.+self.z)
 
 			line_results[line] = {'line_flux':line_flux, 
+								  'ew':ew,
+								  'ew0':ew0,
+								  'gauss':evaluated_gaussian,
+								  'continuum':evaluated_continuum,
 								  'snr':line_flux.n/line_flux.s,
 								  'xfit':xfit, 
 								  'yfit':yfit, 
 								  'yerr':efit, 
-								  # 'profile16':evaluated16, 
 								  'profile50':evaluated50, 
-								  # 'profile84':evaluated84, 
 								  'fit_func':gauss}
 
 		self.results = line_results
 
 		if verbose==True:
 			for line in self.results:
-				print(f'{line} : lam=%0.1f, sig=%0.1f, line_flux=%.3E +/- %.3E (%0.2f)' % (self.results[line]['fit_func'].mean_0.value, self.results[line]['fit_func'].stddev_0.value,self.results[line]['line_flux'].n,self.results[line]['line_flux'].s,self.results[line]['snr']))
+				print(f'{line} : lam=%0.1f, sig=%0.1f, line_flux=%.3E +/- %.3E (%0.2f), ew=%0.2f +/- %0.2f, ew0=%0.2f +/- %0.2f' % (self.results[line]['fit_func'].mean_0.value, self.results[line]['fit_func'].stddev_0.value,self.results[line]['line_flux'].n,self.results[line]['line_flux'].s,self.results[line]['snr'],self.results[line]['ew'].n,self.results[line]['ew'].s,self.results[line]['ew0'].n,self.results[line]['ew0'].s))
 
 		if plot_results==True:
 			fig = plt.figure(figsize=(8.,4.))
 			ax = fig.add_subplot(111)
 			ax.fill_between(self.lam/10000., self.flux-self.err, self.flux+self.err, alpha=0.2)
-			ax.step(self.lam/10000., self.flux, linewidth=1.5)
+			ax.step(self.lam/10000., self.flux, linewidth=1.5, where='mid')
 			# ax.set_ylim(ax.set_ylim()[0], np.nanmax(self.flux)*0.25)
 			for line in self.results:
 				# ylow, yupp = self.results[line]['profile16'], self.results[line]['profile84']
 				xfit, yfit = self.results[line]['xfit'], self.results[line]['profile50']
 				# ax.fill_between(xfit/10000., ylow, yupp, color='darkred', alpha=0.2)
-				ax.plot(xfit/10000., yfit, linewidth=2., color='darkred')
+				ax.step(xfit/10000., yfit, linewidth=2., color='darkred', where='mid')
 
 				ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
 				ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
@@ -211,177 +216,6 @@ class LineFitting:
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
 			plt.tight_layout()
 			plt.show()
-
-
-	# def fit_windows(self, windows=[[1400.,2000],[3500.,4500.],[4700.,5200.]], lam_window=500., normval=1., verbose=True, plot_results=False, fit_params={}, R=100):
-	# 	"""
-	# 	lam_window : The wavelength window [in Angstrom] over which to evaluate the line fluxes, centered on the redshifted line
-	# 	plot_results : Plot the results of the line fitting
-	# 	"""
-	# 	if R==100:
-	# 		self.lines_to_fit = {'Lya':1215.,
-	# 							 'CIV':1549.,
-	# 							 'HEII':1640.420,
-	# 							 'OIII':1663.4795,
-	# 							 'CIII':1908.734,
-								 
-	# 							 'OII':3728.,
-	# 							 'NEIII_1':3869.86,
-	# 							 'NEIII_2':3968.59,
-	# 							 'HDELTA':4102.8922,
-	# 							 'HGAMMA':np.mean([4341.6837,4364.436]),
-								 
-	# 							 'HBETA':4862.6830,
-	# 							 'OIII_2':4960.295,
-	# 							 'OIII_3':5008.240,
-								 
-	# 							 'HALPHA':6564.608,
-	# 							 'NII':6585.27,
-	# 							 'SII':np.mean([6718.295,6732.674])}
-	# 	elif R>100:
-	# 		self.lines_to_fit = {'Lya':1215.,
-	# 							 'CIV':1549.,
-	# 							 'HEII':1640.420,
-	# 							 'OIII':1663.4795,
-	# 							 'CIII':1908.734,
-								 
-	# 							 'OII':3728.,
-	# 							 'NEIII_1':3869.86,
-	# 							 'NEIII_2':3968.59,
-	# 							 'HDELTA':4102.8922,
-	# 							 'HGAMMA':4341.6837,
-	# 							 'OIII_1':4364.436,
-								 
-	# 							 'HBETA':4862.6830,
-	# 							 'OIII_2':4960.295,
-	# 							 'OIII_3':5008.240,
-								 
-	# 							 'HALPHA':6564.608,
-	# 							 'NII':6585.27,
-	# 							 'SII_1':6718.295,
-	# 							 'SII_2':6732.674}
-
-	
-	# 	line_results = {}        
-	# 	for nfit,lam_range in enumerate(windows):
-	# 		ifit = np.where((self.lam0 > lam_range[0]) & (self.lam0 < lam_range[1]))[0]
-
-	# 		if len(ifit) == 0:
-	# 			print('No valid elements in spectral window (lam0=%i-%i). Continuing to next window.'%(lam_range[0],lam_range[1]))
-	# 			continue
-
-	# 		xfit, yfit, efit = self.lam[ifit], self.flux[ifit], self.err[ifit]
-
-	# 		Nlines = 0
-	# 		fit_lines = []
-	# 		fit_model = models.Polynomial1D(1)
-	# 		for line in self.lines_to_fit:
-	# 			zline = self.lines_to_fit[line] * (1.+self.z)
-
-	# 			if (zline > min(xfit)) & (zline < max(xfit)):
-	# 				line_model = models.Gaussian1D(amplitude=np.nanmax(yfit[(xfit > (zline - 10.)) & (xfit < (zline + 10.))]), mean=zline, stddev=20.)
-	# 				line_model.amplitude.min = 0.
-	# 				line_model.amplitude.max = np.nanmax(yfit[(xfit > (zline - 10.)) & (xfit < (zline + 10.))])
-	# 				line_model.amplitude.fixed = False
-	# 				line_model.stddev.min = 0.
-	# 				line_model.stddev.fixed = False
-	# 				line_model.mean.min = zline - 10.
-	# 				line_model.mean.max = zline + 10.
-
-	# 				fit_model += line_model
-	# 				Nlines += 1
-	# 				fit_lines.append(line)
-
-	# 		if len(fit_params) > 0:
-	# 			params = fit_params['fit_params_{nfit}']
-	# 			for arg in params:
-	# 				if 'value' in params[arg]:
-	# 					fit_model.__dict__[arg].value = fit_params[arg]['value']
-	# 				if 'min' in params[arg]:
-	# 					fit_model.__dict__[arg].min = fit_params[arg]['min']
-	# 				if 'max' in params[arg]:
-	# 					fit_model.__dict__[arg].max = fit_params[arg]['max']
-	# 				if 'fixed' in params[arg]:
-	# 					fit_model.__dict__[arg].fixed = fit_params[arg]['fixed']
-
-	# 		fit_func = fitting.LevMarLSQFitter(calc_uncertainties=True)
-	# 		model = fit_func(fit_model, xfit, yfit, weights=1./efit, maxiter=9999999)
-
-	# 		model50 = model.copy()
-	# 		evaluated50 = model50(xfit)
-
-	# 		line_results[nfit] = {'profile50':evaluated50, 'xfit':xfit, 'fit_func':model50}
-
-	# 		# Evaluate the line fluxes and results
-	# 		line_sig = lam_window / 2.
-	# 		for N in range(len(fit_lines)):
-	# 			N += 1
-
-	# 			A, mu, sig = model50.__dict__[f'amplitude_{N}'].value, model50.__dict__[f'mean_{N}'].value, model50.__dict__[f'stddev_{N}'].value
-	# 			line = models.Gaussian1D(amplitude=A, mean=mu, stddev=sig)
-
-	# 			if (A==0.) | (sig==0.):
-	# 				continue
-					
-	# 			yline = line(xfit)
-	# 			# iline = np.where(yline > 0.)[0]
-	# 			# xline, yline, eline = xfit[iline], yline[iline], efit[iline]
-	# 			xline, yline, eline = xfit, yline, efit
-
-	# 			dx = np.diff(xline)
-	# 			dx = np.concatenate([dx,[dx[-1]]])
-
-	# 			line_flux = np.nansum(unp.uarray(yline, eline) * normval * dx)
-
-	# 			# popt = [model50.c0_0.value,model50.c1_0.value,model50.c2_0.value]
-	# 			# cont_model = models.Polynomial1D(2).evaluate(xline, *popt)
-	# 			popt = [model50.c0_0.value,model50.c1_0.value]
-	# 			cont_model = models.Polynomial1D(1).evaluate(xline, *popt)
-
-	# 			yprofile = cont_model + yline
-
-	# 			ew = abs(np.nansum((1. - yprofile / cont_model) * dx))
-	# 			ew0 = ew / (1.+self.z)
-
-	# 			line_results[fit_lines[N-1]] = {'line_flux':line_flux, 
-	# 											'snr':line_flux.n/line_flux.s,
-	# 											'xfit':xline, 
-	# 											'yfit':yline, 
-	# 											'yerr':eline, 
-	# 											'profile50':yprofile, 
-	# 											'fit_func':line,
-	# 											'ew':ew,
-	# 											'ew0':ew0
-	# 											}
-	# 		line_results[nfit]['fit_lines'] = fit_lines
-	# 	self.results = line_results
-
-	# 	if verbose==True:
-	# 		for line in self.results:
-	# 			if line in [0,1,2,3,4,5,6,7,8,9,10,'fit_lines']:
-	# 				continue
-	# 			print(f'{line} : lam=%0.1f, sig=%0.1f, line_flux=%.3E +/- %.3E (%0.2f)' % (self.results[line]['fit_func'].mean.value, self.results[line]['fit_func'].stddev.value,self.results[line]['line_flux'].n,self.results[line]['line_flux'].s,self.results[line]['snr']))
-
-	# 	if plot_results==True:
-	# 		fig = plt.figure(figsize=(8.,4.))
-	# 		ax = fig.add_subplot(111)
-	# 		# ax.fill_between(self.lam/10000., self.flux-self.err, self.flux+self.err, alpha=0.2)
-	# 		ax.step(self.lam/10000., self.flux, linewidth=1.5)
-	# 		maxval = abs(np.nanmax(self.flux[(self.lam > 3.)]))
-	# 		ax.set_ylim(-maxval*0.25, maxval*0.75)
-	# 		for window in range(len(windows)):
-	# 			xfit, yfit = self.results[window]['xfit'], self.results[window]['profile50']
-	# 			ax.plot(xfit/10000., yfit, linewidth=2., color='darkred')
-
-	# 			ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
-	# 			ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
-	# 			for line in self.results[window]['fit_lines']:
-	# 				zline = self.lines_to_fit[line] * (1.+self.z) / 10000.
-	# 				ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
-	# 		ax.plot(ax.set_xlim(), [0.,0.], linestyle='--', linewidth=1., color='black')
-	# 		gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
-	# 		plt.tight_layout()
-	# 		plt.show()
 
 
 	def fit_windows(self, windows=[[1400.,2000],[3500.,4500.],[4700.,5200.]], lam_window=500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
@@ -876,7 +710,40 @@ class LineFitting:
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
 			plt.tight_layout()
 			plt.show()
+
+
+	def fit_upper_limit(self, clam=None, npix=3, plot_results=False):
+		from astropy.constants import c
+		import astropy.units as u
+		c = c.to(u.km/u.s).value
 		
+		assert clam!=None, 'Need to provide a central wavelength over which to calculate the upper limit.'
+		
+		cent = gf.find_nearest(clam, self.lam)
+		signal_limits = [int(cent-(npix/2)),int(cent+(npix/2)+1)]
+	
+		H = np.nanstd(self.flux[signal_limits[0]:signal_limits[-1]])
+		dlam = self.lam[signal_limits[-1]] - self.lam[signal_limits[0]]
+		dv = (dlam / clam) * c
+		line_flux = H * dlam / (2.35 * 0.3989)
+		
+		cont = np.nanmedian(self.flux[signal_limits[0]:signal_limits[-1]])
+		ew = line_flux / cont
+		ew0 = ew / (1.+self.z)
+		print(clam/(1.+self.z), line_flux, cont, ew, ew0)
+
+		results = {'line_flux':line_flux, 'cont':cont, 'ew':ew, 'ew0':ew0}
+		
+		if plot_results==True:
+			fig = plt.figure(figsize=(8.,4.))
+			ax = fig.add_subplot(111)
+			ax.step(self.lam0, self.flux)
+			ax.fill_between([self.lam0[signal_limits[0]],self.lam0[signal_limits[1]]], [ax.set_ylim()[0],ax.set_ylim()[0]], [ax.set_ylim()[1],ax.set_ylim()[1]], color='cyan', alpha=0.3)
+			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
+			plt.tight_layout()
+			plt.show()
+		
+		return results
 
 def inverse_variance_mean(flux_array, error_array):
 	"""
