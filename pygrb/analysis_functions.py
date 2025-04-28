@@ -1044,7 +1044,7 @@ def stack_spectra(stack_flux, stack_err=None, op='median', clip=False, sigma_sig
 					ierr.append(np.nanmedian(stack_err.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]**2.))
 			elif op=='mean':
 				iflux.append(np.nanmean(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
-				istd.append(np.nanmean(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
+				istd.append(np.nanstd(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
 				if stack_err is not None:
 					ierr.append(np.nanmean(stack_err.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]**2.))
 			nstack.append(len(stack_flux.T[i][(stack_flux.T[i] != 0.)]))
@@ -1059,7 +1059,7 @@ def stack_spectra(stack_flux, stack_err=None, op='median', clip=False, sigma_sig
 					ierr.append(np.nanmedian(err_arr**2.))
 			elif op=='mean':
 				iflux.append(np.nanmean(flux_arr))
-				iflux.append(np.nanstd(flux_arr))
+				istd.append(np.nanstd(flux_arr))
 				if stack_err is not None:
 					ierr.append(np.nanmean(err_arr**2.))
 			nstack.append(len(flux_arr))

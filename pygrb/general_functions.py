@@ -63,7 +63,11 @@ class load_jewels:
 			flux = fnu_to_flam(lam, flux*(1.e-6)*(1.e-23), fnu_err=err*(1.e-6)*(1.e-23))
 			err = unp.std_devs(flux)
 			flux = unp.nominal_values(flux)
-		return lam, flux, err
+		if 'mask' in self.spectra[msaid]['prism-clear']:
+			mask = self.spectra[msaid]['prism-clear']['mask']
+		else:
+			mask = np.zeros_like(lam)
+		return lam, flux, err, mask
 
 	def load_grating_spectrum(self, msaid, units='msaexp'):
 		lam, flux, err = [], [], []
