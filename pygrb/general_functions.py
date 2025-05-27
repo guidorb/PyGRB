@@ -16,6 +16,7 @@ import pickle
 from . import analysis_functions as af
 from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
+import os
 
 
 # def load_jewels(import_catalog=True, import_spectra=False):
@@ -32,7 +33,7 @@ from astropy.wcs import WCS
 # 		return tab_spec
 
 class load_jewels:
-	def __init__(self):
+	def __init__(self, load_z10=False):
 		self.tab = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full.dat')
 		self.spectra = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_18April2025_full.p', "rb"), encoding='latin1')
 		self.coords = SkyCoord(self.tab['ra'], self.tab['dec'], unit=(u.deg,u.deg))
@@ -46,6 +47,11 @@ class load_jewels:
 		f = pyfits.open('/Users/guidorb/Dropbox/Catalogs/Astrodeep/AllFields_photoz.fits')
 		self.astrodeep_zphot = f[1].data.copy()
 		f.close()
+
+		if load_z10==True:
+			self.z10_cat = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_unique_sample.cat')
+			self.z10_props = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_properties.cat')
+			self.z10_spec = pickle.load(open('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_spectral_catalog_unique.p', "rb"), encoding='latin1')
 
 
 	def plot_prism_spectrum(self, msaid, **kwargs):
@@ -118,14 +124,16 @@ class load_jewels:
 		f.close()
 		print(f'Written to file: ./{msaid}_nirspec_prism.txt')
 
-	def get_entry(self, msaid, with_header=False):
+	def get_entry(self, msaid, with_header=False, print_output=True):
 		try:
 			i = np.where(self.tab['msaid'] == msaid)[0][0]
 			ra, dec, z, mu, AB = self.tab['ra'][i], self.tab['dec'][i], self.tab['z'][i], self.tab['mu'][i], self.tab['AB'][i]
-			if with_header==True:
-				print('MSA-ID Ra Dec zspec AB mu')
-				print('--------------------------')
-			print(msaid, '%0.5f %0.5f %0.3f %0.1f %0.1f'%(ra, dec, z, AB, mu))
+			if print_output==True:
+				if with_header==True:
+					print('MSA-ID Ra Dec zspec AB mu')
+					print('--------------------------')
+				print(msaid, '%0.5f %0.5f %0.3f %0.1f %0.1f'%(ra, dec, z, AB, mu))
+			return {'msaid':msaid, 'ra':ra, 'dec':dec, 'z':z, 'mu':mu, 'AB':AB}
 		except:
 			print('This MSA-ID entry does not exist.')
 
@@ -224,14 +232,14 @@ def find_nearest(array,value,returnindex=True):
 	else:
 		return array[idx]
 
-def style_axes(ax, xlabel=None, ylabel=None, fontsize=None, labelsize=None, linewidth=None):
+def style_axes(ax, xlabel=None, ylabel=None, fontsize=None, labelsize=None, linewidth=None, kwargs={'bottom':True,'top':True,'left':True,'right':True}):
 	if fontsize==None:
 		fontsize = 18.5
 	if labelsize==None:
 		labelsize = 18.5
 	if linewidth==None:
 		linewidth = 1.25
-	ax.tick_params(axis='both', which='both', direction='in', bottom=True, top=True, left=True, right=True, labelsize=labelsize)
+	ax.tick_params(axis='both', which='both', direction='in', bottom=kwargs['bottom'], top=kwargs['top'], left=kwargs['left'], right=kwargs['right'], labelsize=labelsize)
 	for axis in ['top','bottom','left','right']:
 		ax.spines[axis].set_linewidth(linewidth)
 	ax.xaxis.set_tick_params(width=linewidth)
@@ -396,7 +404,7 @@ def emission_line(xvals, x0, A, width, FWHM=False):
 	gauss = A * np.exp(-np.power(xvals - x0, 2.) / (2. * np.power(linewidth, 2.)))
 	return gauss
 
-def photo_from_filter(wave, spectrum, filt=None):
+def photo_from_filter(wave, spectrum, spectrum_err=None, filt=None):
 	# NB: wave should be in microns
 	path = '/Users/guidorb/Dropbox/Postdoc/filters/'
 
@@ -404,7 +412,11 @@ def photo_from_filter(wave, spectrum, filt=None):
 	response = np.interp(wave, filt_file.T[0]/10000, filt_file.T[1], left=0., right=0.)
 
 	photo = np.nansum(spectrum * response)/np.nansum(response)
-	return  photo
+	if spectrum_err is not None:
+		photo_err = np.nansum((spectrum_err**2.) * response)/np.nansum(response)
+		return photo, photo_err
+	else:
+		return photo
 
 def get_filter_info(filt, output_unit='mu'):
 	f = ascii.read(f'/Users/guidorb/Dropbox/Postdoc/filters/{filt}')
@@ -945,3 +957,10 @@ def make_cutout(input_fits, output_fits, ra, dec, size_arcsec, plot_cutout=False
 			plt.axis('off')
 			plt.title('RGB Composite from HST Images')
 			plt.show()
+
+
+def dja_cutout(ra, dec, boxsize=1.5, filters=None, output=None, asinh=True):
+	assert filters!=None, 'Need to provide filters [e.g., f814w, f444w-clear]'
+	
+	for filt in filters:
+		os.system(f"wget 'https://grizli-cutout.herokuapp.com/thumb?all_filters=True&size={boxsize}&scl=1.0&asinh={asinh}&filters={filt}&ra={ra}&dec={dec}&output=fits_weight' -O '{output}_{filt}.fits'")
