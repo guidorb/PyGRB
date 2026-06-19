@@ -4,8 +4,6 @@ from astropy.modeling import models, fitting, Fittable1DModel, Parameter
 from astropy.visualization import astropy_mpl_style, simple_norm
 from scipy.interpolate import interp1d, RegularGridInterpolator
 from matplotlib.patches import Rectangle
-from ipywidgets import interact
-import ipywidgets as widgets
 from astropy.stats import sigma_clip
 from copy import copy
 import astropy.units as u
@@ -23,35 +21,25 @@ import random
 from astropy.cosmology import Planck15 as cosmo
 import matplotlib.pyplot as plt
 import corner
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar, nnls, curve_fit
 import emcee
-import astropy.units as u
 from astropy import __version__ as asver
-# import gsf
-# print(gsf.__version__)
-# from gsf.function import get_input,write_input
-# from gsf.gsf import run_gsf_template
-# from gsf.plot_sed import plot_sed
-# from gsf.plot_sfh import plot_sfh
-# from gsf.function import read_input
-from scipy.optimize import curve_fit
 import scipy
-from astropy.modeling import models,fitting
 import tqdm
 import extinction
 
 c = c.to(u.km/u.s).value
 
 class LineFitting:
-	def __init__(self, lam=None, flux=None, err=None, units='msaexp', z=None, msaid_prism=None):
+	def __init__(self, lam, flux, err, units='msaexp', msaid_prism=None):
 		"""
 		lam : Observed wavelengths [Microns or Angstroms, will be converted to Angstrom]
 		flux : Observed fluxes [micro-Jansky]
 		err : Same units as flux
-		z : Redshift
 		"""
 		if msaid_prism==None:
-			assert (lam is not None) & (flux is not None) & (err is not None) & (z is not None), 'Need to pass an input spectrum and redshift.'
+			if lam is None or flux is None or err is None:
+				raise ValueError('lam, flux, and err are required when msaid_prism is not provided.')
 
 			idx = np.where((np.isfinite(lam)==True) | (np.isfinite(flux)==True) | (np.isfinite(err)==True))[0]
 
@@ -64,32 +52,32 @@ class LineFitting:
 				self.lam = lam[idx]
 				self.flux = flux[idx]
 				self.err = err[idx]
-			self.z = z
-			self.lam0 = self.lam / (1.+self.z)
+			self.z    = None
+			self.lam0 = None
 		else:
 			jewels = gf.load_jewels()
 			i = np.where(jewels.tab['msaid'] == msaid_prism)[0][0]
-			if z==None:
-				self.z = jewels.tab['z'][i]
-			else:
-				self.z = z
+			self.z = jewels.tab['z'][i]
 
-			idx = np.where((np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['lam'])==True) | 
-							(np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['flux'])==True) | 
+			idx = np.where((np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['lam'])==True) |
+							(np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['flux'])==True) |
 							(np.isfinite(jewels.spectra[msaid_prism]['prism-clear']['err'])==True))[0]
 
 			self.lam = jewels.spectra[msaid_prism]['prism-clear']['lam'][idx] * 10000.
-			flam = gf.fnu_to_flam(self.lam, jewels.spectra[msaid_prism]['prism-clear']['flux'][idx]*(1.e-6)*(1.e-23), 
+			flam = gf.fnu_to_flam(self.lam, jewels.spectra[msaid_prism]['prism-clear']['flux'][idx]*(1.e-6)*(1.e-23),
 								fnu_err=jewels.spectra[msaid_prism]['prism-clear']['err'][idx]*(1.e-6)*(1.e-23))
 			self.flux = unp.nominal_values(flam)
 			self.err = unp.std_devs(flam)
 			self.lam0 = self.lam / (1.+self.z)
 
-	def fit_single(self, lam_window=100., normval=1., Niter_err=100, verbose=True, plot_results=False, lines_to_fit=None, fit_kwargs={}):
+	def fit_single(self, z=None, lam_window=100., normval=1., Niter_err=100, verbose=True, plot_results=False, lines_to_fit=None, fit_kwargs={}):
 		"""
 		lam_window : The wavelength window [in Angstrom] over which to fit, centered on the redshifted line
 		plot_results : Plot the results of the line fitting
 		"""
+		z = z if z is not None else self.z
+		if z is None:
+			raise ValueError('A redshift z must be provided either here or via fit_for_redshift.')
 		if lines_to_fit==None:
 			self.lines_to_fit = {'HEII_1':1640.420,
 								 'OIII_05':1663.4795,
@@ -121,7 +109,7 @@ class LineFitting:
 
 		line_results = {}
 		for line in self.lines_to_fit:
-			zline = self.lines_to_fit[line] * (1.+self.z)
+			zline = self.lines_to_fit[line] * (1.+z)
 			ifit = np.where((self.lam >= (zline-line_sig)) & (self.lam <= (zline+line_sig)) & (np.isfinite(self.flux)==True))[0]
 
 			if len(ifit)==0:
@@ -209,9 +197,9 @@ class LineFitting:
 
 			yprofile = cont_model + gaussian_line
 			ew = abs(np.nansum((1. - yprofile / cont_model) * dx))
-			ew0 = ew / (1.+self.z)
+			ew0 = ew / (1.+z)
 
-			line_results ={'line_flux':line_flux, 
+			line_results ={'line_flux':line_flux,
 								 'snr':line_flux.n/line_flux.s,
 								 'xfit':xfit,
 								 'yfit':self.flux[ifit],
@@ -247,146 +235,13 @@ class LineFitting:
 
 				ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
 				ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
-				zline = self.lines_to_fit[line] * (1.+self.z) / 10000.
+				zline = self.lines_to_fit[line] * (1.+z) / 10000.
 				ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
 			plt.tight_layout()
 			plt.show()
 
-	# def fit_single(self, lam_window=100., normval=1., verbose=True, plot_results=False, lines_to_fit=None, fit_params={}):
-	# 	"""
-	# 	lam_window : The wavelength window [in Angstrom] over which to fit, centered on the redshifted line
-	# 	plot_results : Plot the results of the line fitting
-	# 	"""
-	# 	if lines_to_fit==None:
-	# 		self.lines_to_fit = {'HEII_1':1640.420,
-	# 							 'OIII_05':1663.4795,
-	# 							 'CIII':1908.734,
-								 
-	# 							 'OII_UV_1':3727.092,
-	# 							 'OII_UV_2':3729.875,
-	# 							 'NEIII_UV_1':3869.86,
-	# 							 'NEIII_UV_2':3968.59,
-	# 							 'HDELTA':4102.8922,
-	# 							 'HGAMMA':4341.6837,
-	# 							 'OIII_1':4364.436,
-	# 							 'HEI_1':4471.479,
-								 
-	# 							 'HEII_2':4685.710,
-	# 							 'HBETA':4862.6830,
-	# 							 'OIII_2':4960.295,
-	# 							 'OIII_3':5008.240,
-								 
-	# 							 'HEI':5877.252,
-								 
-	# 							 'HALPHA':6564.608,
-	# 							 'SII_1':6718.295,
-	# 							 'SII_2':6732.674}
-	# 	else:
-	# 		self.lines_to_fit = lines_to_fit
-
-	# 	line_sig = lam_window / 2.
-
-	# 	line_results = {}
-	# 	for line in self.lines_to_fit:
-	# 		zline = self.lines_to_fit[line] * (1.+self.z)
-	# 		ifit = np.where((self.lam >= (zline-line_sig)) & (self.lam <= (zline+line_sig)) & (np.isfinite(self.flux)==True))[0]
-
-	# 		if len(ifit)==0:
-	# 			print(f'No valid elements for line {line}. Please try a larger or different wavelength window.')
-	# 			continue
-	# 		# assert len(ifit) > 0, 'No valid elements in spectral window. Please try a larger wavelength window.'
-
-	# 		# Define the spectrum window over which to fit
-	# 		xfit, yfit, efit = self.lam[ifit], self.flux[ifit], self.err[ifit]
-
-	# 		# Define the model
-	# 		fit_model = models.Gaussian1D(amplitude=np.nanmax(yfit), mean=zline, stddev=60.) + models.Linear1D(slope=0., intercept=0.)
-	# 		fit_model.amplitude_0.min = 0.
-	# 		fit_model.amplitude_0.max = np.nanmax(yfit)
-	# 		fit_model.amplitude_0.fixed = False
-	# 		fit_model.stddev_0.min = 0.
-	# 		# fit_model.stddev_0.max = 500.
-	# 		fit_model.stddev_0.fixed = False
-	# 		fit_model.slope_1.fixed = False
-
-	# 		if len(fit_params) > 0:
-	# 			for arg in fit_params:
-	# 				if 'value' in fit_params[arg]:
-	# 					fit_model.__dict__[arg].value = fit_params[arg]['value']
-	# 				if 'min' in fit_params[arg]:
-	# 					fit_model.__dict__[arg].min = fit_params[arg]['min']
-	# 				if 'max' in fit_params[arg]:
-	# 					fit_model.__dict__[arg].max = fit_params[arg]['max']
-	# 				if 'fixed' in fit_params[arg]:
-	# 					fit_model.__dict__[arg].fixed = fit_params[arg]['fixed']
-
-
-	# 		fit_func = fitting.LevMarLSQFitter(calc_uncertainties=True)
-	# 		gauss = fit_func(fit_model, xfit, yfit, weights=1./efit, maxiter=9999999)
-
-	# 		model50 = gauss.copy()
-	# 		evaluated50 = gauss(xfit)
-	# 		f_gauss = models.Gaussian1D(amplitude=gauss.amplitude_0.value, mean=gauss.mean_0.value, stddev=gauss.stddev_0.value)
-	# 		evaluated_gaussian = f_gauss(xfit)
-	# 		f_cont = models.Linear1D(slope=gauss.slope_1.value, intercept=gauss.intercept_1.value)
-	# 		evaluated_continuum = f_cont(xfit)
-
-	# 		dx = np.diff(xfit)
-	# 		dx = np.concatenate([dx,[dx[-1]]])
-
-	# 		# line_flux16 = np.nansum(evaluated16 * normval * dx)
-	# 		# line_flux50 = np.nansum(evaluated50 * normval * dx)
-	# 		# line_flux84 = np.nansum(evaluated84 * normval * dx)
-	# 		# line_flux_err = np.mean([line_flux84-line_flux50,line_flux50-line_flux16])
-	# 		# line_flux = ufloat(line_flux50, line_flux_err)
-
-	# 		# line_flux = np.nansum(unp.uarray(evaluated50, efit) * normval * dx)
-
-	# 		line_flux = np.nansum(unp.uarray(evaluated_gaussian, efit) * normval * dx)
-	# 		ew = line_flux / (evaluated_continuum[gf.find_nearest(xfit, gauss.mean_0.value)]*normval)
-	# 		ew0 = ew / (1.+self.z)
-
-	# 		line_results[line] = {'line_flux':line_flux, 
-	# 							  'ew':ew,
-	# 							  'ew0':ew0,
-	# 							  'gauss':evaluated_gaussian,
-	# 							  'continuum':evaluated_continuum,
-	# 							  'snr':line_flux.n/line_flux.s,
-	# 							  'xfit':xfit, 
-	# 							  'yfit':yfit, 
-	# 							  'yerr':efit, 
-	# 							  'profile50':evaluated50, 
-	# 							  'fit_func':gauss}
-
-	# 	self.results = line_results
-
-	# 	if verbose==True:
-	# 		for line in self.results:
-	# 			print(f'{line} : lam=%0.1f, sig=%0.1f, line_flux=%.3E +/- %.3E (%0.2f), ew=%0.2f +/- %0.2f, ew0=%0.2f +/- %0.2f' % (self.results[line]['fit_func'].mean_0.value, self.results[line]['fit_func'].stddev_0.value,self.results[line]['line_flux'].n,self.results[line]['line_flux'].s,self.results[line]['snr'],self.results[line]['ew'].n,self.results[line]['ew'].s,self.results[line]['ew0'].n,self.results[line]['ew0'].s))
-
-	# 	if plot_results==True:
-	# 		fig = plt.figure(figsize=(8.,4.))
-	# 		ax = fig.add_subplot(111)
-	# 		ax.fill_between(self.lam/10000., self.flux-self.err, self.flux+self.err, alpha=0.2)
-	# 		ax.step(self.lam/10000., self.flux, linewidth=1.5, where='mid')
-	# 		# ax.set_ylim(ax.set_ylim()[0], np.nanmax(self.flux)*0.25)
-	# 		for line in self.results:
-	# 			# ylow, yupp = self.results[line]['profile16'], self.results[line]['profile84']
-	# 			xfit, yfit = self.results[line]['xfit'], self.results[line]['profile50']
-	# 			# ax.fill_between(xfit/10000., ylow, yupp, color='darkred', alpha=0.2)
-	# 			ax.step(xfit/10000., yfit, linewidth=2., color='darkred', where='mid')
-
-	# 			ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
-	# 			ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
-	# 			zline = self.lines_to_fit[line] * (1.+self.z) / 10000.
-	# 			ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
-	# 		gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
-	# 		plt.tight_layout()
-	# 		plt.show()
-
-
-	def fit_windows(self, windows=[[1400.,2000],[3500.,4500.],[4700.,5200.]], lam_window=500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
+	def fit_windows(self, z=None, windows=[[1400.,2000],[3500.,4500.],[4700.,5200.]], lam_window=500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
 		"""
 		lam_window : The wavelength window [in Angstrom] over which to evaluate the line fluxes, centered on the redshifted line
 		plot_results : Plot the results of the line fitting
@@ -440,9 +295,14 @@ class LineFitting:
 								 'SII_2':6732.674}
 	
 		
-		line_results = {}        
+		z = z if z is not None else self.z
+		if z is None:
+			raise ValueError('A redshift z must be provided either here or via fit_for_redshift.')
+		lam0 = self.lam / (1.+z)
+
+		line_results = {}
 		for nfit,lam_range in enumerate(windows):
-			ifit = np.where((self.lam0 > lam_range[0]) & (self.lam0 < lam_range[1]))[0]
+			ifit = np.where((lam0 > lam_range[0]) & (lam0 < lam_range[1]))[0]
 	
 			if len(ifit) == 0:
 				print('No valid elements in spectral window (lam0=%i-%i). Continuing to next window.'%(lam_range[0],lam_range[1]))
@@ -462,7 +322,7 @@ class LineFitting:
 				# Construct the line model
 				fit_model = models.Polynomial1D(1)
 				for line in self.lines_to_fit:
-					zline = self.lines_to_fit[line] * (1.+self.z)
+					zline = self.lines_to_fit[line] * (1.+z)
 	
 					if (zline > min(xfit)) & (zline < max(xfit)):
 	
@@ -528,7 +388,7 @@ class LineFitting:
 
 				yprofile = cont_model + gaussian_line
 				ew = abs(np.nansum((1. - yprofile / cont_model) * dx))
-				ew0 = ew / (1.+self.z)
+				ew0 = ew / (1.+z)
 
 				if hasattr(self, 'results'):
 					self.results[fit_lines[N-1]] = {'line_flux':line_flux, 
@@ -587,7 +447,7 @@ class LineFitting:
 				ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
 				ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
 				for line in self.results[window]['fit_lines']:
-					zline = self.lines_to_fit[line] * (1.+self.z)
+					zline = self.lines_to_fit[line] * (1.+z)
 					ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
 			ax.plot(ax.set_xlim(), [0.,0.], linestyle='--', linewidth=1., color='black')
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
@@ -595,7 +455,11 @@ class LineFitting:
 			plt.show()
 
 
-	def fit_lya_skew(self, lam_window=2500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
+	def fit_lya_skew(self, z=None, lam_window=2500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
+
+		z = z if z is not None else self.z
+		if z is None:
+			raise ValueError('A redshift z must be provided either here or via fit_for_redshift.')
 
 		# Skew-normal function to fit Lya
 		class SkewedGaussian1D(Fittable1DModel):
@@ -603,18 +467,17 @@ class LineFitting:
 			mean = Parameter()
 			stddev = Parameter()
 			skew = Parameter()
-		
+
 			@staticmethod
 			def evaluate(x, amplitude, mean, stddev, skew):
 				norm_x = (x - mean) / stddev
 				return amplitude * np.exp(-0.5 * norm_x**2) * (1 + skew * norm_x)
 
-
-		zline = 1215.670 * (1.+self.z)
+		zline = 1215.670 * (1.+z)
 		ifit = np.where((self.lam > zline-(lam_window/2.)) & (self.lam < zline+(lam_window/2.)))[0]
 
 		assert len(ifit)>2, 'Need at least 3 spectral elements to fit the line. There are less than 3.'
-	
+
 		xfit, efit = self.lam[ifit], self.err[ifit]
 
 		fit_params = []
@@ -699,10 +562,10 @@ class LineFitting:
 
 		yprofile = cont_model + lya_line
 		ew = abs(np.nansum((1. - yprofile / cont_model) * dx))
-		ew0 = ew / (1.+self.z)
+		ew0 = ew / (1.+z)
 
 		if hasattr(self, 'results'):
-			self.results['LYA'] = {'line_flux':line_flux, 
+			self.results['LYA'] = {'line_flux':line_flux,
 										'snr':line_flux.n/line_flux.s,
 										'xfit':xfit,
 										'yfit':self.flux[ifit],
@@ -715,7 +578,7 @@ class LineFitting:
 										'params':{'A':A, 'A_array':A_array, 'mu':mu, 'skew':skew, 'mu_array':mu_array, 'sig':sig, 'sig_array':sig_array, 'skew_array':skew_array},
 										}
 		else:
-			self.results = {'LYA':{'line_flux':line_flux, 
+			self.results = {'LYA':{'line_flux':line_flux,
 										'snr':line_flux.n/line_flux.s,
 										'xfit':xfit,
 										'yfit':self.flux[ifit],
@@ -743,7 +606,7 @@ class LineFitting:
 
 			ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
 			ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
-			zline = 1215.670 * (1.+self.z)
+			zline = 1215.670 * (1.+z)
 			ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
 			ax.plot(ax.set_xlim(), [0.,0.], linestyle='--', linewidth=1., color='black')
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
@@ -751,13 +614,17 @@ class LineFitting:
 			plt.show()
 
 
-	def fit_lya_gauss(self, lam_window=2500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
+	def fit_lya_gauss(self, z=None, lam_window=2500., normval=1., Niter_err=100, verbose=True, plot_results=False, R=100):
 
-		zline = 1215.670 * (1.+self.z)
+		z = z if z is not None else self.z
+		if z is None:
+			raise ValueError('A redshift z must be provided either here or via fit_for_redshift.')
+
+		zline = 1215.670 * (1.+z)
 		ifit = np.where((self.lam > zline-(lam_window/2.)) & (self.lam < zline+(lam_window/2.)))[0]
 
 		assert len(ifit)>2, 'Need at least 3 spectral elements to fit the line. There are less than 3.'
-	
+
 		xfit, efit = self.lam[ifit], self.err[ifit]
 
 		fit_params = []
@@ -831,7 +698,7 @@ class LineFitting:
 		yprofile = cont_model + lya_line
 		try:
 			ew = abs(np.nansum((1. - yprofile / cont_model) * dx))
-			ew0 = ew / (1.+self.z)
+			ew0 = ew / (1.+z)
 		except:
 			ew = -99.
 			ew0 = -99.
@@ -878,7 +745,7 @@ class LineFitting:
 
 			ymin = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.6
 			ymax = ax.set_ylim()[0] + (ax.set_ylim()[1]-ax.set_ylim()[0]) * 0.7
-			zline = 1215.670 * (1.+self.z)
+			zline = 1215.670 * (1.+z)
 			ax.plot([zline,zline], [ymin,ymax], linestyle='-', linewidth=3., color='black')
 			ax.plot(ax.set_xlim(), [0.,0.], linestyle='--', linewidth=1., color='black')
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
@@ -886,20 +753,23 @@ class LineFitting:
 			plt.show()
 
 
-	def fit_upper_limit(self, clam=None, npix=3, Niter=1, plot_results=False):
+	def fit_upper_limit(self, z=None, clam=None, npix=3, Niter=1, plot_results=False):
 		from astropy.constants import c
 		import astropy.units as u
 		c = c.to(u.km/u.s).value
-		
+
+		z = z if z is not None else self.z
+		if z is None:
+			raise ValueError('A redshift z must be provided either here or via fit_for_redshift.')
+
 		assert clam!=None, 'Need to provide a central wavelength over which to calculate the upper limit.'
-		
+
 		cent = gf.find_nearest(clam, self.lam)
 		signal_limits = [int(cent-(npix/2)),int(cent+(npix/2)+1)]
 
-		
 		dlam = self.lam[signal_limits[-1]] - self.lam[signal_limits[0]]
 		dv = (dlam / clam) * c
-	
+
 		values = []
 		for N in tqdm.tqdm(range(Niter)):
 			if N==0:
@@ -908,29 +778,267 @@ class LineFitting:
 				yfit = np.random.normal(loc=self.flux[signal_limits[0]:signal_limits[-1]], scale=self.err[signal_limits[0]:signal_limits[-1]])
 			H = np.nanstd(yfit)
 			line_flux = H * dlam / (2.35 * 0.3989)
-		
+
 			cont = np.nanmedian(self.flux[signal_limits[0]:signal_limits[-1]])
 			ew = line_flux / cont
-			ew0 = ew / (1.+self.z)
+			ew0 = ew / (1.+z)
 
 			values.append([line_flux, cont, ew, ew0])
 		values = np.array(values)
 
-
-		print(clam/(1.+self.z), 'line_flux :', np.nanmedian(line_flux), 'cont flux :',np.nanmedian(cont), 'ew=%0.3f'%np.nanmedian(ew), 'ew0=%0.3f'%np.nanmedian(ew0))
+		lam0 = self.lam / (1.+z)
+		print(clam/(1.+z), 'line_flux :', np.nanmedian(line_flux), 'cont flux :',np.nanmedian(cont), 'ew=%0.3f'%np.nanmedian(ew), 'ew0=%0.3f'%np.nanmedian(ew0))
 
 		results = {'line_flux':np.nanmedian(line_flux), 'cont':np.nanmedian(cont), 'ew':np.nanmedian(ew), 'ew0':np.nanmedian(ew0)}
-		
+
 		if plot_results==True:
 			fig = plt.figure(figsize=(8.,4.))
 			ax = fig.add_subplot(111)
-			ax.step(self.lam0, self.flux)
-			ax.fill_between([self.lam0[signal_limits[0]],self.lam0[signal_limits[1]]], [ax.set_ylim()[0],ax.set_ylim()[0]], [ax.set_ylim()[1],ax.set_ylim()[1]], color='cyan', alpha=0.3)
+			ax.step(lam0, self.flux)
+			ax.fill_between([lam0[signal_limits[0]],lam0[signal_limits[1]]], [ax.set_ylim()[0],ax.set_ylim()[0]], [ax.set_ylim()[1],ax.set_ylim()[1]], color='cyan', alpha=0.3)
 			gf.style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\lambda}$ [cgs]')
 			plt.tight_layout()
 			plt.show()
-		
+
 		return results
+
+	def fit_for_redshift(self, z_init=None, z_range=None, plot=False):
+		"""
+		Estimate the spectroscopic redshift from the Hβ + [OIII]λλ4959,5007 complex.
+
+		Uses self.lam (Å), self.flux, and self.err as set at construction.  At each
+		trial redshift a linear continuum is fit inside a window around the predicted
+		complex, then Hβ and combined [OIII] amplitudes are solved by NNLS on the
+		continuum-subtracted residual (enforcing emission-only contributions).  The
+		chi-squared improvement over continuum-only is maximised on a grid then
+		refined with a bounded scalar optimizer.  Updates self.z and self.lam0 on
+		success.
+
+		Parameters
+		----------
+		z_init : float, optional
+		    Initial redshift guess.  Restricts the search to z_init ± 0.5.
+		    Ignored if z_range is given.
+		z_range : tuple of float, optional
+		    Explicit (z_lo, z_hi) search bounds, overriding z_init and the
+		    automatic spectrum-based range.
+		plot : bool, optional
+		    If True, plot the best-fit model on the spectrum in the fitting
+		    window plus an inset of delta-chi2 vs redshift.
+
+		Returns
+		-------
+		z_fit : float
+		    Best-fit redshift.
+		z_err : float
+		    1σ uncertainty from the curvature of the score surface.
+		result : dict
+		    z_grid    – trial redshifts searched
+		    score_grid– delta-chi2 improvement at each grid point
+		    A_hb      – best-fit Hβ amplitude
+		    A_oiii2   – best-fit [OIII]5007 amplitude  (A_oiii1 = A_oiii2 / 3)
+		    A_oiii1   – best-fit [OIII]4959 amplitude
+		    chi2_red  – reduced chi-squared of the line model at z_fit
+		"""
+		good = np.isfinite(self.flux) & np.isfinite(self.err) & (self.err > 0.)
+		flux = self.flux[good]
+		err  = self.err[good]
+		ivar = 1. / err**2
+
+		# Work internally in Angstroms; detect if self.lam is in microns
+		lam_in_um = self.lam.max() < 100.
+		lam = self.lam[good] * (10000. if lam_in_um else 1.)
+
+		# Rest-frame line wavelengths (Angstroms)
+		_LAM_HB    = 4862.6830
+		_LAM_OIII1 = 4960.295
+		_LAM_OIII2 = 5008.240
+
+		# Line width: 1 spectral pixel — adapts to prism or any grating
+		dlam_pix  = float(np.median(np.diff(lam)))
+		sigma_lam = dlam_pix
+		_N_WING   = 30   # half-window in pixels around the Hb–[OIII] complex
+
+		# Redshift range: spectrum coverage with no artificial upper cap
+		z_lo_spec = max(0.02, lam.min() / _LAM_OIII2 - 1.)
+		z_hi_spec = lam.max() / _LAM_HB - 1.
+
+		if z_range is not None:
+			z_lo, z_hi = float(z_range[0]), float(z_range[1])
+		elif z_init is not None:
+			z_lo = max(z_lo_spec, z_init - 0.5)
+			z_hi = min(z_hi_spec, z_init + 0.5)
+		else:
+			z_lo, z_hi = z_lo_spec, z_hi_spec
+
+		if z_hi <= z_lo:
+			raise ValueError(
+				f"Hb+[OIII] complex does not fall within the spectrum for "
+				f"the requested redshift range ({z_lo:.2f}–{z_hi:.2f})."
+			)
+
+		def _delta_chi2(z):
+			"""Chi-squared improvement from adding line templates at redshift z."""
+			lz_hb    = _LAM_HB    * (1. + z)
+			lz_oiii1 = _LAM_OIII1 * (1. + z)
+			lz_oiii2 = _LAM_OIII2 * (1. + z)
+
+			win = (lam >= lz_hb    - _N_WING * dlam_pix) & \
+			      (lam <= lz_oiii2 + _N_WING * dlam_pix)
+			n = int(win.sum())
+			if n < 8:
+				return 0.
+
+			lw, fw, iw = lam[win], flux[win], ivar[win]
+			sw   = np.sqrt(iw)
+			lw_c = lw - lw.mean()
+
+			# Gaussian templates; [OIII] doublet combined with fixed 3:1 ratio
+			G_hb   = np.exp(-0.5 * ((lw - lz_hb)    / sigma_lam)**2)
+			G_oiii = np.exp(-0.5 * ((lw - lz_oiii2) / sigma_lam)**2) + \
+			         (1. / 3.) * np.exp(-0.5 * ((lw - lz_oiii1) / sigma_lam)**2)
+
+			# Continuum-only model (WLS)
+			A_c   = np.column_stack([np.ones(n), lw_c])
+			p_c   = np.linalg.lstsq(A_c * sw[:, None], fw * sw, rcond=None)[0]
+			resid = fw - A_c @ p_c
+			chi2_null = float(np.dot(iw, resid**2))
+
+			# Non-negative line amplitudes on the continuum residual
+			A_l        = np.column_stack([G_hb, G_oiii])
+			amp, _     = nnls(A_l * sw[:, None], resid * sw)
+			chi2_lines = float(np.dot(iw, (resid - A_l @ amp)**2))
+
+			return chi2_null - chi2_lines
+
+		# Coarse grid search
+		dz     = 0.003
+		z_grid = np.arange(z_lo, z_hi + dz * 0.5, dz)
+		scores = np.array([_delta_chi2(z) for z in z_grid])
+
+		i_best    = int(np.argmax(scores))
+		z_lo_fine = z_grid[max(0, i_best - 3)]
+		z_hi_fine = z_grid[min(len(z_grid) - 1, i_best + 3)]
+
+		# Sub-grid refinement
+		opt   = minimize_scalar(lambda z: -_delta_chi2(z),
+		                        bounds=(z_lo_fine, z_hi_fine), method='bounded')
+		z_fit = float(opt.x)
+
+		# 1σ uncertainty from curvature: Δscore = 1 ↔ 1σ
+		dz_fd      = max(dz * 0.1, 1e-5)
+		s0, sp, sm = _delta_chi2(z_fit), _delta_chi2(z_fit + dz_fd), _delta_chi2(z_fit - dz_fd)
+		d2s        = (sp - 2. * s0 + sm) / dz_fd**2
+		z_err      = float(np.sqrt(2. / abs(d2s))) if d2s < 0. else np.nan
+
+		# Best-fit parameters at z_fit
+		lz_hb    = _LAM_HB    * (1. + z_fit)
+		lz_oiii1 = _LAM_OIII1 * (1. + z_fit)
+		lz_oiii2 = _LAM_OIII2 * (1. + z_fit)
+		win_f    = (lam >= lz_hb    - _N_WING * dlam_pix) & \
+		           (lam <= lz_oiii2 + _N_WING * dlam_pix)
+
+		lw_f  = lam[win_f];  fw_f = flux[win_f];  iw_f = ivar[win_f];  sw_f = np.sqrt(iw_f)
+		lw_fc = lw_f - lw_f.mean()
+		nf    = int(win_f.sum())
+
+		G_hb_f   = np.exp(-0.5 * ((lw_f - lz_hb)    / sigma_lam)**2)
+		G_oiii_f = np.exp(-0.5 * ((lw_f - lz_oiii2) / sigma_lam)**2) + \
+		           (1. / 3.) * np.exp(-0.5 * ((lw_f - lz_oiii1) / sigma_lam)**2)
+
+		A_c_f    = np.column_stack([np.ones(nf), lw_fc])
+		p_c_f    = np.linalg.lstsq(A_c_f * sw_f[:, None], fw_f * sw_f, rcond=None)[0]
+		resid_f  = fw_f - A_c_f @ p_c_f
+		cont_f   = A_c_f @ p_c_f
+
+		A_l_f    = np.column_stack([G_hb_f, G_oiii_f])
+		amp_f, _ = nnls(A_l_f * sw_f[:, None], resid_f * sw_f)
+
+		chi2_fit = float(np.dot(iw_f, (resid_f - A_l_f @ amp_f)**2))
+		dof      = max(nf - 4, 1)
+
+		self.z    = z_fit
+		self.lam0 = self.lam / (1. + z_fit)
+
+		if plot:
+			# Display window: 3× the fitting half-width for continuum context
+			_N_PLOT = _N_WING * 3
+			win_p   = (lam >= lz_hb    - _N_PLOT * dlam_pix) & \
+			          (lam <= lz_oiii2 + _N_PLOT * dlam_pix)
+			lam_p   = lam[win_p]
+			flux_p  = flux[win_p]
+			err_p   = err[win_p]
+
+			# Build smooth model curve over the display window
+			lam_mod   = np.linspace(lam_p.min(), lam_p.max(), 2000)
+			lam_mod_c = lam_mod - lw_f.mean()
+			G_hb_m   = np.exp(-0.5 * ((lam_mod - lz_hb)    / sigma_lam)**2)
+			G_oiii_m = np.exp(-0.5 * ((lam_mod - lz_oiii2) / sigma_lam)**2) + \
+			           (1. / 3.) * np.exp(-0.5 * ((lam_mod - lz_oiii1) / sigma_lam)**2)
+			cont_mod  = p_c_f[0] + p_c_f[1] * lam_mod_c
+			total_mod = cont_mod + amp_f[0] * G_hb_m + amp_f[1] * G_oiii_m
+
+			# self.lam is in Å; plot in µm (standard JWST convention)
+			fac         = 1e-4 if lam_in_um else 1.
+			lam_p_plt   = lam_p   * fac
+			lam_mod_plt = lam_mod * fac
+			lz_plt      = np.array([lz_hb, lz_oiii1, lz_oiii2]) * fac
+			xlabel      = r'$\lambda_{\rm obs}$ [µm]' if lam_in_um else r'$\lambda_{\rm obs}$ [Å]'
+
+			# Sensible y-limits from the display window
+			f_finite  = flux_p[np.isfinite(flux_p)]
+			ylo_data  = np.nanpercentile(f_finite, 1.)
+			yhi_data  = np.nanpercentile(f_finite, 99.)
+			yspan     = yhi_data - ylo_data
+			ylim      = (ylo_data - 0.15 * yspan, yhi_data + 0.45 * yspan)
+
+			fig, ax = plt.subplots(1, 1, figsize=(10., 5.))
+
+			ax.step(lam_p_plt, flux_p, color='k', linewidth=1.2, where='mid', label='Spectrum')
+			ax.fill_between(lam_p_plt, flux_p - err_p, flux_p + err_p,
+			                step='mid', color='grey', alpha=0.3)
+			ax.plot(lam_mod_plt, total_mod, color='C1', linewidth=2.,
+			        label=rf'Model  $z = {z_fit:.4f} \pm {z_err:.4f}$')
+			ax.plot(lam_mod_plt, cont_mod, color='C1', linewidth=1.,
+			        linestyle='--', alpha=0.6, label='Continuum')
+
+			# Line position markers and labels
+			line_labels = [r'H$\beta$', r'[O III]$\lambda$4959', r'[O III]$\lambda$5007']
+			ymark_lo = ylim[0] + 0.60 * yspan
+			ymark_hi = ylim[0] + 0.75 * yspan
+			ytext    = ylim[0] + 0.77 * yspan
+			for lz_p, label in zip(lz_plt, line_labels):
+				ax.plot([lz_p, lz_p], [ymark_lo, ymark_hi],
+				        color='C0', linestyle='--', linewidth=1.)
+				ax.text(lz_p, ytext, label, color='C0', fontsize=9,
+				        ha='center', va='bottom', rotation=90)
+
+			ax.set_ylim(ylim)
+			ax.set_xlim(lam_p_plt.min(), lam_p_plt.max())
+			gf.style_axes(ax, xlabel, r'$F_\nu$ [µJy]')
+			ax.legend(fontsize=10, loc='upper left')
+
+			# Inset: delta-chi2 vs redshift
+			ax_in = ax.inset_axes([0.67, 0.55, 0.31, 0.38])
+			ax_in.plot(z_grid, scores, color='k', linewidth=1.)
+			ax_in.axvline(z_fit, color='C1', linestyle='--', linewidth=1.5)
+			ax_in.set_xlabel('z', fontsize=9)
+			ax_in.set_ylabel(r'$\Delta\chi^2$', fontsize=9)
+			ax_in.tick_params(labelsize=8, direction='in', top=True, right=True)
+			for sp in ax_in.spines.values():
+				sp.set_linewidth(0.8)
+
+			plt.tight_layout()
+			plt.show()
+
+		return z_fit, z_err, {
+			'z_grid'    : z_grid,
+			'score_grid': scores,
+			'A_hb'      : float(amp_f[0]),
+			'A_oiii2'   : float(amp_f[1]),
+			'A_oiii1'   : float(amp_f[1] / 3.),
+			'chi2_red'  : chi2_fit / dof,
+		}
 
 def inverse_variance_mean(flux_array, error_array):
 	"""
@@ -987,38 +1095,22 @@ def inverse_variance_mean_sigma_clip(flux_array, error_array, sigma=3.0):
 	if flux_array.shape != error_array.shape:
 		raise ValueError("Flux and error arrays must have the same shape.")
 
-	N, n = flux_array.shape
+	# First pass: compute per-pixel weighted mean and std across all spectra
+	weights       = 1.0 / error_array**2
+	w_sum         = np.nansum(weights, axis=0)
+	weighted_mean = np.nansum(flux_array * weights, axis=0) / w_sum
+	weighted_std  = np.sqrt(1.0 / w_sum)
 
-	# Array to hold clipped flux/error
-	clipped_flux = flux_array.copy()
-	clipped_error = error_array.copy()
+	# Sigma clipping: mask spectra that deviate too far per pixel
+	clip_mask     = np.abs(flux_array - weighted_mean) > sigma * weighted_std
+	clipped_flux  = np.where(clip_mask, np.nan, flux_array)
+	clipped_error = np.where(clip_mask, np.nan, error_array)
 
-	# Loop over wavelength bins and sigma-clip
-	for i in range(n):
-		f = flux_array[:, i]
-		e = error_array[:, i]
-
-		# Compute mean and std using inverse variance weights
-		w = 1.0 / e**2
-		weighted_mean = np.nansum(f * w) / np.nansum(w)
-		weighted_std  = np.sqrt(1.0 / np.nansum(w))   # standard weighted error
-
-		# Sigma clipping mask
-		mask = np.abs(f - weighted_mean) <= sigma * weighted_std
-
-		# Apply mask (set clipped values to NaN)
-		clipped_flux[:, i][~mask]  = np.nan
-		clipped_error[:, i][~mask] = np.nan
-
-	# Now compute inverse-variance weighted mean on clipped data
+	# Second pass: inverse-variance weighted combination on clipped data
 	weights = 1.0 / clipped_error**2
-	weights[np.isnan(weights)] = 0.0
+	weights = np.where(np.isnan(weights), 0.0, weights)
 
-	combined_flux = (
-		np.nansum(clipped_flux * weights, axis=0) /
-		np.nansum(weights, axis=0)
-	)
-
+	combined_flux  = np.nansum(clipped_flux  * weights, axis=0) / np.nansum(weights, axis=0)
 	combined_error = np.sqrt(1.0 / np.nansum(weights, axis=0))
 
 	return combined_flux, combined_error
@@ -2304,45 +2396,29 @@ def gaussian_smooth_spectrum(wave, flux, error, sigma_A, nan_policy="omit"):
 	if wave.shape != flux.shape or flux.shape != error.shape:
 		raise ValueError("wave, flux, and error must have the same shape")
 
-	N = wave.size
-	smooth_flux = np.empty_like(flux, dtype=float)
-	smooth_error = np.empty_like(error, dtype=float)
+	# Precompute full (N×N) Gaussian kernel; kernel[j,i] = weight from pixel i → output j
+	dlam   = wave[:, None] - wave[None, :]           # shape (N, N)
+	kernel = np.exp(-0.5 * (dlam / sigma_A)**2)
 
-	# Precompute wavelength differences and Gaussian kernel
-	dlam = wave[None, :] - wave[:, None]          # shape (N, N)
-	kernel = np.exp(-0.5 * (dlam / sigma_A)**2)   # Gaussian kernel
+	if nan_policy == "omit":
+		good = np.isfinite(flux) & np.isfinite(error)  # shape (N,)
+		f    = np.where(good, flux,  0.)
+		e    = np.where(good, error, 0.)
+		w    = kernel * good[None, :]                   # zero-weight bad pixels
+	elif nan_policy == "propagate":
+		f, e, w = flux, error, kernel
+	else:
+		raise ValueError("nan_policy must be 'omit' or 'propagate'")
 
-	for j in range(N):
-		w = kernel[j, :]
+	w_sum   = w.sum(axis=1)                            # shape (N,)
+	valid_j = w_sum > 0
+	w_safe  = np.where(valid_j[:, None], w_sum[:, None], 1.)
+	w_norm  = np.where(valid_j[:, None], w / w_safe, 0.)
 
-		if nan_policy == "omit":
-			good = np.isfinite(flux) & np.isfinite(error)
-			# Restrict to good points only
-			f_j = flux[good]
-			e_j = error[good]
-			w_j = w[good]
-		elif nan_policy == "propagate":
-			f_j = flux
-			e_j = error
-			w_j = w
-		else:
-			raise ValueError("nan_policy must be 'omit' or 'propagate'")
+	smooth_flux  = (w_norm * f[None, :]).sum(axis=1)
+	smooth_error = np.sqrt((w_norm**2 * e[None, :]**2).sum(axis=1))
 
-		w_sum = np.sum(w_j)
-		if w_sum <= 0 or not np.isfinite(w_sum) or f_j.size == 0:
-			smooth_flux[j] = np.nan
-			smooth_error[j] = np.nan
-			continue
-
-		# Normalized weights
-		w_norm = w_j / w_sum
-
-		# Smoothed flux: Gaussian weighted average
-		smooth_flux[j] = np.sum(w_norm * f_j)
-
-		# Propagate variance using same weights:
-		# Var(F_j) = sum( w_norm^2 * σ_i^2 )
-		var_j = np.sum((w_norm**2) * (e_j**2))
-		smooth_error[j] = np.sqrt(var_j)
+	smooth_flux  = np.where(valid_j, smooth_flux,  np.nan)
+	smooth_error = np.where(valid_j, smooth_error, np.nan)
 
 	return smooth_flux, smooth_error

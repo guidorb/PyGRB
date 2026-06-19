@@ -5,22 +5,7 @@ from astropy.io import ascii
 import pickle
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-
-def style_axes(ax, xlabel=None, ylabel=None, fontsize=None, labelsize=None, linewidth=None):
-	if fontsize==None:
-		fontsize = 18.5
-	if labelsize==None:
-		labelsize = 18.5
-	if linewidth==None:
-		linewidth = 1.25
-	ax.tick_params(axis='both', which='both', direction='in', bottom=True, top=True, left=True, right=True, labelsize=labelsize)
-	for axis in ['top','bottom','left','right']:
-		ax.spines[axis].set_linewidth(linewidth)
-	ax.xaxis.set_tick_params(width=linewidth)
-	ax.yaxis.set_tick_params(width=linewidth)
-	if (xlabel != None) | (ylabel != None):
-		ax.set_xlabel(xlabel, fontsize=fontsize)
-		ax.set_ylabel(ylabel, fontsize=fontsize)
+from .general_functions import style_axes
 
 class load_jewels:
 	def __init__(self, main_path=None):

@@ -5,6 +5,7 @@ import numpy as np
 from . import general_functions as gf
 import matplotlib.pyplot as plt
 
+
 def MUV_to_LUV(MUV):
 	LUV = (2.5e29) * (10**((MUV+21.91)/-2.5))
 	return LUV
@@ -12,6 +13,52 @@ def MUV_to_LUV(MUV):
 def LUV_to_MUV(LUV):
 	MUV = -21.91 - 2.5*np.log10(LUV / (2.5e29))
 	return MUV
+
+
+def _integrate_puv(x, y, yerr, Mint):
+	"""Integrate UV luminosity density (pUV) down to Mint, returning (pUV, pUV_err)."""
+	xlum = MUV_to_LUV(x)
+	mask = x <= Mint
+	pUV_upp = trapezoid(xlum[mask], y[mask] + yerr[mask])
+	pUV     = trapezoid(xlum[mask], y[mask])
+	pUV_low = trapezoid(xlum[mask], y[mask] - yerr[mask])
+	pUV_err = np.mean([pUV_upp - pUV, pUV - pUV_low], axis=0)
+	return pUV, pUV_err
+
+
+class _ZIndexedLF:
+	"""Base class for LF models that are parameterized by a redshift grid.
+
+	Subclasses must implement get_phi_mag(z, MUV_array) and set self.redshifts.
+	"""
+
+	def get_puv(self, z=None, Mint=None):
+		assert z is not None, f'Please select a redshift to compute {list(self.redshifts)}'
+		if Mint is None:
+			Mint = -18.
+		if isinstance(z, (np.ndarray, list)):
+			pUV_values, pUVerr_values = [], []
+			for zi in z:
+				x, y, yerr = self.get_phi_mag(z=zi)
+				pUV, pUV_err = _integrate_puv(x, y, yerr, Mint)
+				pUV_values.append(pUV)
+				pUVerr_values.append(pUV_err)
+			return pUV_values, pUVerr_values
+		x, y, yerr = self.get_phi_mag(z=z)
+		return _integrate_puv(x, y, yerr, Mint)
+
+	def get_psfr(self, z=None, Mint=None):
+		assert z is not None, f'Please select a redshift to compute {list(self.redshifts)}'
+		if Mint is None:
+			Mint = -18.
+		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
+		if isinstance(pUV_val, (np.ndarray, list)):
+			pUV = unp.uarray(pUV_val, pUV_err)
+		else:
+			pUV = ufloat(pUV_val, pUV_err)
+		pSFR = pUV * 1.15e-28
+		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
+
 
 class Schechter:
 	def __init__(self, phi_star, Mstar, alpha):
@@ -31,42 +78,27 @@ class Schechter:
 	def get_number_counts(self, Mint=None):
 		assert Mint!=None, 'Please provide a magnitude to integrate the UVLF down to.'
 		x, y, yerr = self.get_phi_mag()
-		
 		pUV = trapezoid(x[(x <= Mint)], y[(x <= Mint)])
 		return pUV
 
 	def get_puv(self, Mint=None, log=False):
-		if Mint==None:
+		if Mint is None:
 			Mint = -18.
-		
 		x, y, yerr = self.get_phi_mag()
-		xlum = MUV_to_LUV(x)
-		
-		pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-		pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-		pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-		pUV_err = np.mean(abs(np.diff([pUV_upp, pUV, pUV_low])))
-
-		if log==True:
-			pUV = unp.log10(ufloat(pUV, pUV_err))
-			pUV_err = unp.std_devs(pUV)
-			pUV = unp.nominal_values(pUV)
-
-		pUV = ufloat(pUV, pUV_err)
-		return pUV
+		pUV, pUV_err = _integrate_puv(x, y, yerr, Mint)
+		if log:
+			log_pUV = unp.log10(ufloat(pUV, pUV_err))
+			pUV     = unp.nominal_values(log_pUV)
+			pUV_err = unp.std_devs(log_pUV)
+		return ufloat(pUV, pUV_err)
 
 	def get_psfr(self, Mint=None, log=False):
-		if Mint==None:
+		if Mint is None:
 			Mint = -18.
-
 		pUV = self.get_puv(Mint=Mint, log=False)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-
-		if log==True:
+		pSFR = pUV * 1.15e-28
+		if log:
 			pSFR = unp.log10(pSFR)
-
 		return pSFR
 
 
@@ -87,42 +119,27 @@ class DoublePower:
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
 
 	def get_puv(self, Mint=None, log=False):
-		if Mint==None:
+		if Mint is None:
 			Mint = -18.
-		
 		x, y, yerr = self.get_phi_mag()
-		xlum = MUV_to_LUV(x)
-		
-		pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-		pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-		pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-		pUV_err = np.mean(abs(np.diff([pUV_upp, pUV, pUV_low])))
-
-		if log==True:
-			pUV = unp.log10(ufloat(pUV, pUV_err))
-			pUV_err = unp.std_devs(pUV)
-			pUV = unp.nominal_values(pUV)
-
-		pUV = ufloat(pUV, pUV_err)
-		return pUV
+		pUV, pUV_err = _integrate_puv(x, y, yerr, Mint)
+		if log:
+			log_pUV = unp.log10(ufloat(pUV, pUV_err))
+			pUV     = unp.nominal_values(log_pUV)
+			pUV_err = unp.std_devs(log_pUV)
+		return ufloat(pUV, pUV_err)
 
 	def get_psfr(self, Mint=None, log=False):
-		if Mint==None:
+		if Mint is None:
 			Mint = -18.
-
 		pUV = self.get_puv(Mint=Mint, log=False)
-
-		factor = 1.15e-28
-
-		pSFR = pUV * factor
-
-		if log==True:
+		pSFR = pUV * 1.15e-28
+		if log:
 			pSFR = unp.log10(pSFR)
-
 		return pSFR
 
 
-class Mason15:
+class Mason15(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([0.,2.,4.,5.,6.,7.,8.,9.,10.,12.,14.,16])
 		self.phi_star = 10**unp.uarray([-2.97,-2.52,-2.93,-3.12,-3.19,-3.48,-4.03,-4.50,-5.12,-5.94,-7.05,-8.25],[np.mean([0.07,0.08]),np.mean([0.07,0.09]),np.mean([0.13,0.19]),np.mean([0.15,0.24]),np.mean([0.16,0.25]),np.mean([0.18,0.32]),np.mean([0.26,0.72]),np.mean([0.29,1.36]),0.34,0.38,0.45,0.51])
@@ -139,54 +156,9 @@ class Mason15:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = (np.log(10.)/2.5) * self.phi_star[i] * ((10**(0.4*(self.Mstar[i]-MUV_array)))**(self.alpha[i]+1.)) * unp.exp(-10.**(0.4*(self.Mstar[i]-MUV_array)))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
 
 
-class Bouwens15:
+class Bouwens15(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([3.8,4.9,5.9,6.8,7.9,10.4])
 		self.phi_star = unp.uarray([1.97,0.74,0.50,0.29,0.21,0.008],[np.mean([0.34,0.29]),np.mean([0.18,0.14]),np.mean([0.22,0.16]),np.mean([0.21,0.12]),np.mean([0.23,0.11]),np.mean([0.004,0.003])])
@@ -204,54 +176,9 @@ class Bouwens15:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = (np.log(10.)/2.5) * self.phi_star[i] * ((10**(0.4*(self.Mstar[i]-MUV_array)))**(self.alpha[i]+1.)) * unp.exp(-10.**(0.4*(self.Mstar[i]-MUV_array)))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
 
 
-class Donnan23:
+class Donnan23(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([8.0,9.0,10.5,13.25])
 		self.phi_star = unp.uarray([3.30,2.10,3.32,0.51],[3.41,1.68,8.96,0.22])*(1.e-4)
@@ -269,55 +196,9 @@ class Donnan23:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = self.phi_star[i] / ((10**(0.4*(self.alpha[i]+1)*(MUV_array-self.Mstar[i]))) + (10**(0.4*(self.beta[i]+1)*(MUV_array-self.Mstar[i]))))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
 
 
-
-class Donnan24:
+class Donnan24(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([9.0,10.0,11.0,12.5,14.5])
 		self.phi_star = unp.uarray([39.2,16.4,9.86,0.99,0.28],[23.5,14.5,3.27,0.99,0.18])*(1.e-5)
@@ -334,54 +215,9 @@ class Donnan24:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = self.phi_star[i] / ((10**(0.4*(self.alpha[i]+1)*(MUV_array-self.Mstar[i]))) + (10**(0.4*(self.beta[i]+1)*(MUV_array-self.Mstar[i]))))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
 
 
-class Harikane23_Schechter:
+class Harikane23_Schechter(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([9.,12.,16.])
 		self.phi_star = unp.uarray([-4.83,-5.95,-5.84],[np.mean([0.49,0.37]),np.mean([0.18,1.84]),np.mean([0.47,4.03])])
@@ -399,54 +235,9 @@ class Harikane23_Schechter:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = (np.log(10.)/2.5) * self.phi_star[i] * ((10**(0.4*(self.Mstar[i]-MUV_array)))**(self.alpha[i]+1.)) * unp.exp(-10.**(0.4*(self.Mstar[i]-MUV_array)))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)
 
 
-class Harikane23_DPL:
+class Harikane23_DPL(_ZIndexedLF):
 	def __init__(self):
 		self.redshifts = np.array([9.,12.,16.])
 		self.phi_star = 10**unp.uarray([-3.5,-4.32,-4.71],[np.mean([0.65,1.53]),0.22,np.mean([0.33,2.83])])
@@ -463,48 +254,3 @@ class Harikane23_DPL:
 			MUV_array = np.arange(-25.,-14.99,0.01)
 		phi_mag = self.phi_star[i] / ((10**(0.4*(self.alpha[i]+1)*(MUV_array-self.Mstar[i]))) + (10**(0.4*(self.beta[i]+1)*(MUV_array-self.Mstar[i]))))
 		return MUV_array, unp.nominal_values(phi_mag), unp.std_devs(phi_mag)
-	
-	def get_puv(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-		
-		if type(z) in [np.ndarray,list]:
-			pUV_values, pUVerr_values = [], []
-			for zi in z:
-				x, y, yerr = self.get_phi_mag(z=zi)
-				xlum = MUV_to_LUV(x)
-		
-				pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-				pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-				pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-				pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-
-				pUV_values.append(pUV)
-				pUVerr_values.append(pUV_err)
-			return pUV_values, pUVerr_values
-
-		else:
-			x, y, yerr = self.get_phi_mag(z=z)
-			xlum = MUV_to_LUV(x)
-	
-			pUV_upp = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]+yerr[(x <= Mint)])
-			pUV = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)])
-			pUV_low = trapezoid(xlum[(x <= Mint)], y[(x <= Mint)]-yerr[(x <= Mint)])
-			pUV_err = np.mean([pUV_upp-pUV, pUV-pUV_low], axis=0)
-			return pUV, pUV_err
-	
-	def get_psfr(self, z=None, Mint=None):
-		assert z!=None, f'Please select a redshift to compute {list(self.redshifts)}'
-		if Mint==None:
-			Mint = -18.
-
-		pUV_val, pUV_err = self.get_puv(z=z, Mint=Mint)
-		if type(pUV_val) in [np.ndarray,list]:
-			pUV = unp.uarray(pUV_val,pUV_err)
-		else:
-			pUV = ufloat(pUV_val, pUV_err)
-
-		factor = 1.15e-28
-		pSFR = pUV * factor
-		return unp.nominal_values(pSFR), unp.std_devs(pSFR)

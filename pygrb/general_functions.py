@@ -3,9 +3,7 @@ import matplotlib.pyplot as plt
 from astropy import units as u
 from astropy.constants import c
 from astropy.cosmology import WMAP9 as cosmo
-from time import sleep
-# from tqdm import tqdm
-from tqdm import tqdm_notebook as tqdm
+from tqdm import tqdm
 from astropy.coordinates import SkyCoord, Distance
 from uncertainties import ufloat
 from uncertainties import unumpy as unp
@@ -18,19 +16,6 @@ from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
 import os
 
-
-# def load_jewels(import_catalog=True, import_spectra=False):
-# 	if import_catalog==True:
-# 		tab_cat = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_public.dat')
-# 	if import_spectra==True:
-# 		tab_spec = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_22April2024_single_public.p', "rb"), encoding='latin1')
-
-# 	if (import_catalog==True) & (import_spectra==True):
-# 		return tab_cat, tab_spec
-# 	elif (import_catalog==True) & (import_spectra==False):
-# 		return tab_cat
-# 	elif (import_catalog==False) & (import_spectra==True):
-# 		return tab_spec
 
 class load_jewels:
 	def __init__(self, load_z10=False):
@@ -91,7 +76,7 @@ class load_jewels:
 				continue
 			lam = np.concatenate([lam, self.spectra[msaid][R]['lam']])
 			flux = np.concatenate([flux, self.spectra[msaid][R]['flux']])
-			err = np.concatenate([flux, self.spectra[msaid][R]['err']])
+			err = np.concatenate([err, self.spectra[msaid][R]['err']])
 		i = np.argsort(lam)
 		lam = lam[i]
 		flux = flux[i]
@@ -355,7 +340,7 @@ def calc_IRAC_color(mAB, EW, z, lam_eff, filter='CH2'):
 	elif filter=='CH2':
 		filt_lam, filt_response = np.genfromtxt('/Users/guidorb/Dropbox/Postdoc/filters/Spitzer_IRAC.CH2', unpack=True)
 	
-	flux_fnu = unp.nominal_values(convert_AB_to_flux(mAB, 0., output='fnu'))  # convert the continuum magnitude to a flux density
+	flux_fnu = unp.nominal_values(AB_to_flux(mAB, mag_err=0., output_unit='fnu'))  # convert the continuum magnitude to a flux density
 	flux_flam = fnu_to_flam(flux_fnu, lam_eff)  # convert between flux density for the right units: fnu to flam
 	
 	EW_z = EW * (1.+z)  # get the redshifted EW of the line(s)
@@ -381,7 +366,7 @@ def calc_IRAC_EW(mAB_cont, color, z):
 	line_mag = mAB_cont - color
 	ratio = (10**((mAB_cont-line_mag)/-2.5)) # ratio in flux units, to be used lower down
 	
-	flux_fnu_cont = unp.nominal_values(convert_AB_to_flux(mAB_cont, 0., output_unit='fnu'))
+	flux_fnu_cont = unp.nominal_values(AB_to_flux(mAB_cont, mag_err=0., output_unit='fnu'))
 	flux_flam_cont = fnu_to_flam(flux_fnu_cont, 45000.) # units of erg / s cm2 A
 	lineflux_filter = flux_flam_cont/ratio # line flux in units of erg / s cm2 A
 
@@ -405,36 +390,26 @@ def calc_sky_sep(coord1, coord2, return_units='degree'):
 	elif return_units=='degree':
 		return seps
 	
+_C_AA_S = c.to(u.AA/u.s).value
+
 def fnu_to_flam(lam, fnu, fnu_err=None):
 	'''lam : the wavelength at which to evaluate flambda, in units of angstroms
 		fnu : the flux density in units of erg/s/cm^2/Hz (NB: NOT JANSKIES!)
 	'''
-	from astropy.constants import c
-	import astropy.units as u
-	
 	if fnu_err is not None:
-		spec = unp.uarray(fnu,fnu_err)
+		spec = unp.uarray(fnu, fnu_err)
 	else:
-		spec = fnu#.copy()
-
-	c = c.to(u.AA/u.s).value
-	flam = (c/(lam**2.)) * spec# * (u.erg/u.s/(u.cm**2.)/u.AA)
-	return flam
+		spec = fnu
+	return (_C_AA_S / lam**2.) * spec
 
 def flam_to_fnu(lam, flam, flam_err=None):
 	'''flam : the flux density in units of erg/s/cm^2/A
 	   lam : the wavelength at which to evaluate flambda, in units of angstroms'''
-	from astropy.constants import c
-	import astropy.units as u
-	
 	if flam_err is not None:
-		spec = unp.uarray(flam,flam_err)
+		spec = unp.uarray(flam, flam_err)
 	else:
-		spec = flam#.copy()
-
-	c = c.to(u.AA/u.s).value
-	fnu = ((lam**2.)/c) * spec# * (u.erg/u.s/(u.cm**2.)/u.Hz)
-	return fnu
+		spec = flam
+	return (lam**2. / _C_AA_S) * spec
 
 def emission_line(xvals, x0, A, width, FWHM=False):
 	if FWHM==False:
@@ -472,41 +447,6 @@ def get_filter_info(filt, output_unit='mu'):
 	lam_err_high = lam_max - lam_cent
 	
 	return lam_cent, [[lam_err_low],[lam_err_high]], [lam_min,lam_max]
-
-# def photo_from_filter(wave, spectrum, spectrum_err=None, mask=None, filt=None, threshold=90):
-# 	# NB: wave should be in microns
-# 	path = '/Users/guidorb/Dropbox/Postdoc/filters/'
-# 	f = ascii.read(path+filt)
-	
-# 	filt_lams, filt_resp = f['col1'], f['col2']
-# 	filt_lams = filt_lams / 10000.
-# 	filt_resp = filt_resp / np.nanmax(filt_resp)
-# 	lam_cent = np.mean(filt_lams[(filt_resp > 0.5)])
-# 	lam_err = np.mean([np.max(filt_lams[(filt_resp > 0.5)])-lam_cent, lam_cent - np.min(filt_lams[(filt_resp > 0.5)])])
-	
-# 	response = np.interp(wave, f['col1']/10000, f['col2'], left=0., right=0.)
-# 	norm_response = response / np.max(response)
-# 	idx = np.where(norm_response > 0.5)[0]
-# 	N = len(idx)
-# 	Ngood = len(np.where(spectrum[idx] != 0.)[0])
-# 	if Ngood < int((threshold/100.) * N):
-# 		print(f'Number of non-zero flux pixels is below required threshold ({threshold}\%)')
-# 		return lam_cent, lam_err, 0., 0.
-
-# 	if mask is None:
-# 		mask = np.zeros_like(wave)
-	
-# 	if spectrum_err is not None:
-# 		spec = unp.uarray([spectrum, spectrum_err])
-# 		photo = np.nansum(spec[(mask==0)] * response[(mask==0)])/np.nansum(response[(mask==0)])
-# 		photo_err = unp.std_devs(photo)
-# 		photo = unp.nominal_values(photo)
-# 		return lam_cent, lam_err, photo, photo_err
-# 	else:
-# 		spec = spectrum.copy()
-# 		photo = np.nansum(spec[(mask==0)] * response[(mask==0)])/np.nansum(response[(mask==0)])
-# 		return lam_cent, lam_err, photo
-
 
 def lighten_color(color, amount=1.):
 	"""

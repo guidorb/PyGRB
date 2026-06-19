@@ -24,7 +24,46 @@ from astropy.io import fits as pyfits
 import random
 from astropy.cosmology import Planck15 as cosmo
 
-c = c.to(u.km/u.s).value
+_C_KM_S = c.to(u.km/u.s).value
+
+# Canonical emission line dictionary shared across plotting and masking functions.
+# Keys are display labels; values are lists of rest-frame wavelengths in Angstroms.
+_EMISSION_LINES = {
+    r'Ly$\alpha$':           [1215.67],
+    'C IV':                  [np.mean([1548.187, 1550.772])],
+    r'He II + O III]':       [1640.42, np.mean([1660.809, 1666.150])],
+    r'C III]':               [1908.734],
+    '[O II]':                [3728.4835],
+    '[Ne III]':              [3968.59, 3869.86],
+    r'H$\delta$':            [4102.8922],
+    r'H$\gamma$ + [O III]':  [4353.05985],
+    r'He I_1':               [4472.734],
+    r'He II':                [4687.015],
+    r'H$\beta$':             [4862.6830],
+    '[O III]':               [4960.295, 5008.240],
+    'He I_2':                [5877.252],
+    '[O I]':                 [6302.046],
+    r'H$\alpha$':            [6564.608],
+    '[S II]':                [6725.4845],
+    'He I_3':                [7065.196],
+}
+
+# Grating-specific lines (adds NII doublet around Halpha)
+_EMISSION_LINES_GRATING = {**_EMISSION_LINES, 'NII_1': [6549.86], 'NII_2': [6585.27]}
+
+# Lines used for continuum masking
+_MASK_LINES = {
+    r'Ly$\alpha$': [1215.67],
+    'OII':         [3727.092, 3729.875],
+    'NeIII':       [3968.59, 3869.86],
+    r'H$\delta$':  [4102.8922],
+    'OIII':        [4364.436],
+    r'H$\beta$':   [4862.6830],
+    '[OIII]':      [4960.295, 5008.240],
+    'HeI':         [5877.252],
+    r'H$\alpha$':  [6564.608],
+    'HeI_2':       [7065.196],
+}
 
 def read_composite(name, units='fnu'):
 	corename = name.split('/')[-1]
@@ -275,32 +314,57 @@ def bin_2d_spec(spec2d, factor=1, axis='lam'):
 
 def bin_1d_spec(lam, spec1d, err1d=None, factor=1, method='median'):
 	factor = int(factor)
+	n      = len(lam)
+	n_full = n // factor
+	trunc  = n_full * factor
 
-	ilam = []
-	ispec = []
-	if err1d is not None:
-		ierr = []
-	for i in np.arange(0,len(lam)+factor,factor):
-		ilam.append(np.median(lam[i:i+factor]))
-		if method=='sum':
-			ispec.append(np.nansum(spec1d[i:i+factor]))
-			if err1d is not None:
-				ierr.append(np.sqrt(np.nansum(err1d[i:i+factor]**2.)))
-		elif method=='median':
-			ispec.append(np.nanmedian(spec1d[i:i+factor]))
-			if err1d is not None:
-				ierr.append(np.sqrt(np.nanmedian(err1d[i:i+factor]**2.)))
-		elif method=='mean':
-			ispec.append(np.nanmean(spec1d[i:i+factor]))
-			if err1d is not None:
-				ierr.append(np.sqrt(np.nanmean(err1d[i:i+factor]**2.)))
-	ilam = np.array(ilam)
-	ispec = np.array(ispec)
-	if err1d is not None:
-		ierr = np.array(ierr)
-		return ilam, ispec, ierr
+	if method == 'sum':
+		_reduce = np.nansum
+	elif method == 'median':
+		_reduce = np.nanmedian
 	else:
-		return ilam, ispec
+		_reduce = np.nanmean
+
+	# Vectorized reduction over complete bins
+	ilam  = np.nanmedian(lam[:trunc].reshape(n_full, factor), axis=1)
+	ispec = _reduce(spec1d[:trunc].reshape(n_full, factor), axis=1)
+	if err1d is not None:
+		ierr = np.sqrt(_reduce(err1d[:trunc].reshape(n_full, factor)**2., axis=1))
+
+	# Partial last bin (when n is not a multiple of factor)
+	if trunc < n:
+		ilam  = np.append(ilam,  np.nanmedian(lam[trunc:]))
+		ispec = np.append(ispec, _reduce(spec1d[trunc:]))
+		if err1d is not None:
+			ierr = np.append(ierr, np.sqrt(_reduce(err1d[trunc:]**2.)))
+
+	if err1d is not None:
+		return ilam, ispec, ierr
+	return ilam, ispec
+
+def _plot_emission_lines(ax, z, lines=None, frame='obs'):
+	"""Overplot emission line markers on an existing spectrum axis."""
+	if lines is None:
+		lines = _EMISSION_LINES
+	ylims = ax.get_ylim()
+	midpoint  = ylims[0] + (ylims[1] - ylims[0]) * 0.6
+	highpoint = ylims[0] + (ylims[1] - ylims[0]) * 0.7
+	textpoint = ylims[0] + (ylims[1] - ylims[0]) * 0.725
+	xlims = ax.get_xlim()
+	for line, wavs in lines.items():
+		last_lz = None
+		for wav in wavs:
+			lz = (wav / 10000.) * (1. + z) if frame == 'obs' else wav
+			if xlims[0] <= lz <= xlims[1]:
+				ax.plot([lz, lz], [midpoint, highpoint], linestyle='--', color='darkgray')
+				last_lz = lz
+		if last_lz is None:
+			continue
+		label = line.split('_')[0]
+		offsets = {'[Ne III]': 0.05, '[O III]': 0.08, r'H$\alpha$': -0.065}
+		ax.text(last_lz + offsets.get(label, 0.), textpoint, va='bottom', ha='center',
+				color='darkgray', s=label, rotation=90, fontsize=10.)
+
 
 def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=None, xlims=None, plot_model=False, mask_lines=False, plot_clipped=False, plot_lines=True, lines_to_plot=None):
 	fcat = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full.dat')
@@ -321,32 +385,15 @@ def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=No
 		lam = lam0.copy()
 		
 	if mask_lines==True:
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'OII':[3727.092, 3729.875],
-				 'NeIII':[3968.59, 3869.86],
-				 'H$\delta$':[4102.8922],
-				 'OIII':[4364.436],
-				 r'H$\beta$':[4862.6830],
-				 '[OIII]':[4960.295,5008.240],
-				 'HeI':[5877.252],
-				 r'H$\alpha$':[6564.608],
-				 'HeI_2':[7065.196]}
-
-		for line in lines:
-			if line!=r'Ly$\alpha$':
-				dv = 1000. #km/s
-			else:
-				dv = 10000.
-				
-			for lam_cent in lines[line]:
-				zcent = lam_cent*(1.+z_spec)
-				deltalam = (dv/c) * zcent
-				
-				if line!=r'Ly$\alpha$':                
-					zlam_min, zlam_max = zcent-deltalam, zcent+deltalam
+		for line in _MASK_LINES:
+			dv = 10000. if line == r'Ly$\alpha$' else 1000.
+			for lam_cent in _MASK_LINES[line]:
+				zcent = lam_cent * (1. + z_spec)
+				deltalam = (dv / _C_KM_S) * zcent
+				if line == r'Ly$\alpha$':
+					zlam_min, zlam_max = zcent - deltalam, 1500. * (1. + z_spec)
 				else:
-					zlam_min, zlam_max = zcent-deltalam, 1500.*(1.+z_spec)
-					
+					zlam_min, zlam_max = zcent - deltalam, zcent + deltalam
 				mask[(lam_A >= zlam_min) & (lam_A <= zlam_max)] = 1
 	mask = mask.astype(int)
 	im = spectra[msaid][R]['2D']
@@ -430,72 +477,8 @@ def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=No
 
 	ax2.annotate(xy=(0.025,0.9), xycoords=('axes fraction'), text=msaid+r', $z_{\rm spec.}=%0.3f$'%(z_spec), fontsize=15)
 	
-	midpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.6)
-	highpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.7)
-	textpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.725)
 	if plot_lines==True:
-		# lines = {r'Ly$\alpha$':1215.67,
-		# 		 'OII]':np.mean([3727.092, 3729.875]),
-		# 		 r'H$\beta$':4862.6830,
-		# 		 '[OIII]':5008.240,
-		# 		 r'H$\alpha$':6564.608}
-		# for line in lines:
-		# 	lz = (lines[line] / 10000.) * (1.+z_spec)
-		# 	if (lz < ax2.set_xlim()[0]) | (lz > ax2.set_xlim()[1]):
-		# 		continue
-		# 	ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', linewidth=1.5, color='darkgrey')
-		# 	ax2.text(lz, textpoint, s=line, color='darkgrey', va='bottom', ha='center', fontsize=10, rotation=90)
-
-		if lines_to_plot!=None:
-			lines = lines_to_plot.copy()
-		else:
-			lines = {r'Ly$\alpha$':[1215.67],
-					 'C IV':[np.mean([1548.187,1550.772])],
-					 r'He II + O III]':[1640.42,np.mean([1660.809,1666.150])],
-					 r'C III]':[1908.734],
-					 # 'Mg II]':[2799.1165],
-					 # 'He I UV':[2945.106],
-					 '[O II]':[3728.4835000000003],
-					 '[Ne III]':[3968.59, 3869.86],
-					 r'H$\delta$':[4102.8922],
-					 r'H$\gamma$ + [O III]':[4353.05985],
-					 r'He I_1':[4472.734],
-					 r'He II':[4687.015],
-					 r'H$\beta$':[4862.6830],
-					 '[O III]':[4960.295,5008.240],
-					 'He I_2':[5877.252],
-					 '[O I]':[6302.046],
-					r'H$\alpha$':[6564.608],
-					 '[S II]':[6725.4845000000005],
-					 'He I_3':[7065.196]
-					 }
-		
-		for line in lines:
-			for l in lines[line]:
-				lz = (l / 10000.) * (1.+z_spec)
-				if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-					continue
-				if line==r'H$\beta$':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				elif line=='[O III]':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				else:
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-
-			if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-				continue
-
-			label = line.split('_')[0]
-			if label=='[Ne III]':
-				ax2.text(lz+0.05, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label=='[O III]':
-				ax2.text(lz+0.08, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\beta$':
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\alpha$':
-				ax2.text(lz-0.065, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			else:
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
+		_plot_emission_lines(ax2, z_spec, lines_to_plot if lines_to_plot is not None else _EMISSION_LINES, frame=frame)
 
 	plt.tight_layout()
 	plt.show()
@@ -509,119 +492,64 @@ def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=No
 def plot_msaexp_spectrum(msaid_file, clim=(-0.04,0.09), ylims=None, xlims=None, plot_lines=True, z=None):
 	f = pyfits.open(msaid_file)
 	lam, flux, err = f[1].data['wave'], f[1].data['flux'], f[1].data['err']
-	lam_A = lam * 10000.
 	im = f[0].data
 	f.close()
 
-	try:
-		fz = pyfits.open(msaid_file.replace('.fits','zfit.fits'))
-		z = fz[0].header['z']
-		lam0 = lam_A / (1.+z)	
-		fz.close()
-	except:
-		z = None
+	if z is None:
+		try:
+			fz = pyfits.open(msaid_file.replace('.fits', 'zfit.fits'))
+			z = fz[0].header['z']
+			fz.close()
+		except Exception:
+			z = None
 
-	if (plot_lines==True):
-		assert z!=None, 'Need to specify redshift to use for line plotting...'
-	
-	fig = plt.figure(figsize=(10.,6.))
-	gs = gridspec.GridSpec(nrows=2, ncols=1, height_ratios=[0.25,0.75])
+	if plot_lines:
+		assert z is not None, 'Need to specify redshift to use for line plotting...'
+
+	msaid = msaid_file.split('/')[-1].replace('.fits', '')
+
+	fig = plt.figure(figsize=(10., 6.))
+	gs = gridspec.GridSpec(nrows=2, ncols=1, height_ratios=[0.25, 0.75])
 	ax1 = fig.add_subplot(gs[0])
 	ax1.pcolormesh(lam, np.arange(np.shape(im)[0]), im, cmap='magma', clim=clim)
-	ax1.set_ylim(0,np.shape(im)[0])
-	ycent = int(np.shape(im)[0]/2)
-	ax1.set_ylim(ycent-10,ycent+10)
+	ycent = int(np.shape(im)[0] / 2)
+	ax1.set_ylim(ycent - 10, ycent + 10)
 	ax1.set_xlim(min(lam), max(lam))
 	gf.style_axes(ax1)
 	ax1.set_xticklabels([])
 	ax1.set_yticks([])
 	ax1.set_yticklabels([])
-	
+
 	ax2 = fig.add_subplot(gs[1])
 	ax2.step(lam, flux, color='C0', linewidth=1.25)
-	ax2.set_xlim(ax1.set_xlim())
-	
-	ax2.plot(ax2.set_xlim(), [0.,0.], linestyle='--', color='black')
+	ax2.set_xlim(ax1.get_xlim())
+	ax2.plot(ax2.get_xlim(), [0., 0.], linestyle='--', color='black')
 	gf.style_axes(ax2, r'Observed Wavelength [$\mu$m]', r'Flux Density [$\mu$Jy]')
-	
-	if ylims==None:
-		low = np.nanmin(flux[(lam < 1.) & (lam > 0.8)])
+
+	if ylims is None:
+		valid_low = flux[(lam < 1.) & (lam > 0.8)]
+		valid_high = flux[(lam > 1.) & (lam < 2.)]
+		low = np.nanmin(valid_low) if valid_low.size else 0.
 		if low >= 0.:
 			low = -low
-		low = low + (low * 1.75)
-		
-		high = np.nanmax(flux[(lam > 1.) & (lam < 2.)])
-		high = high + (high * 3.)
-		
-		if (np.isfinite(low)==True) & (np.isfinite(high)==True):
+		low = low + low * 1.75
+		high = np.nanmax(valid_high) if valid_high.size else 1.
+		high = high + high * 3.
+		if np.isfinite(low) and np.isfinite(high):
 			ax2.set_ylim(low, high)
-		else:
-			ax2.set_ylim()
 	else:
-		ax2.set_ylim(ylims[0],ylims[1])
-		
-	if xlims==None:
-		ax2.set_xlim(ax2.set_xlim())
-	else:
+		ax2.set_ylim(ylims[0], ylims[1])
+
+	if xlims is not None:
 		ax1.set_xlim(xlims[0], xlims[1])
 		ax2.set_xlim(xlims[0], xlims[1])
 
-	ax2.fill_between(lam, np.ones_like(lam)*ax2.set_ylim()[0], np.ones_like(lam)*ax2.set_ylim()[1], color='silver', where=(mask==1))
+	ax2.annotate(xy=(0.025, 0.9), xycoords='axes fraction',
+				 text=msaid + (r', $z_{\rm spec.}=%0.3f$' % z if z is not None else ''),
+				 fontsize=15)
 
-	ax2.annotate(xy=(0.025,0.9), xycoords=('axes fraction'), text=msaid+r', $z_{\rm spec.}=%0.3f$'%(z), fontsize=15)
-	
-	midpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.6)
-	highpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.7)
-	textpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.725)
-	if plot_lines==True:
-
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'C IV':[np.mean([1548.187,1550.772])],
-				 r'He II + O III]':[1640.42,np.mean([1660.809,1666.150])],
-				 r'C III]':[1908.734],
-				 # 'Mg II]':[2799.1165],
-				 # 'He I UV':[2945.106],
-				 '[O II]':[3728.4835000000003],
-				 '[Ne III]':[3968.59, 3869.86],
-				 r'H$\delta$':[4102.8922],
-				 r'H$\gamma$ + [O III]':[4353.05985],
-				 r'He I_1':[4472.734],
-				 r'He II':[4687.015],
-				 r'H$\beta$':[4862.6830],
-				 '[O III]':[4960.295,5008.240],
-				 'He I_2':[5877.252],
-				 '[O I]':[6302.046],
-				r'H$\alpha$':[6564.608],
-				 '[S II]':[6725.4845000000005],
-				 'He I_3':[7065.196]
-				 }
-		
-		for line in lines:
-			for l in lines[line]:
-				lz = (l / 10000.) * (1.+z)
-				if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-					continue
-				if line==r'H$\beta$':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				elif line=='[O III]':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				else:
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-
-			if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-				continue
-
-			label = line.split('_')[0]
-			if label=='[Ne III]':
-				ax2.text(lz+0.05, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label=='[O III]':
-				ax2.text(lz+0.08, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\beta$':
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\alpha$':
-				ax2.text(lz-0.065, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			else:
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
+	if plot_lines and z is not None:
+		_plot_emission_lines(ax2, z, _EMISSION_LINES)
 
 	plt.tight_layout()
 	plt.show()
@@ -662,76 +590,18 @@ def plot_grating_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=
 	ax2.plot(ax2.set_xlim(), [0.,0.], linestyle='--', color='black')
 	
 	
-	if ylims==None:
-		ax2.set_ylim(ax2.set_ylim())
+	if ylims is None:
+		ax2.set_ylim(ax2.get_ylim())
 	else:
-		ax2.set_ylim(ylims[0],ylims[1])
-		
-	if xlims==None:
-		ax2.set_xlim(ax2.set_xlim())
-	else:
-		ax1.set_xlim(xlims[0], xlims[1])
+		ax2.set_ylim(ylims[0], ylims[1])
+
+	if xlims is not None:
 		ax2.set_xlim(xlims[0], xlims[1])
 
 	ax2.annotate(xy=(0.025,0.9), xycoords=('axes fraction'), text=msaid+r', $z_{\rm spec.}=%0.3f$'%(z_spec), fontsize=15)
-	
-	midpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.6)
-	highpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.7)
-	textpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) * 0.725)
+
 	if plot_lines==True:
-
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'C IV':[np.mean([1548.187,1550.772])],
-				 r'He II + O III]':[1640.42,np.mean([1660.809,1666.150])],
-				 r'C III]':[1908.734],
-				 # 'Mg II]':[2799.1165],
-				 # 'He I UV':[2945.106],
-				 '[O II]':[3728.4835000000003],
-				 '[Ne III]':[3968.59, 3869.86],
-				 r'H$\delta$':[4102.8922],
-				 r'H$\gamma$ + [O III]':[4353.05985],
-				 r'He I_1':[4472.734],
-				 r'He II':[4687.015],
-				 r'H$\beta$':[4862.6830],
-				 '[O III]':[4960.295,5008.240],
-				 'He I_2':[5877.252],
-				 '[O I]':[6302.046],
-				r'NII_1':[6549.86],
-				r'H$\alpha$':[6564.608],
-				r'NII_2':[6585.27],
-				 '[S II]':[6725.4845000000005],
-				 'He I_3':[7065.196]
-				 }
-		
-		for line in lines:
-			for l in lines[line]:
-				if frame=='obs':
-					lz = (l / 10000.) * (1.+z_spec)
-				elif frame=='rest':
-					lz = l
-				if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-					continue
-				if line==r'H$\beta$':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				elif line=='[O III]':
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-				else:
-					ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', color='darkgray')
-
-			if (lz<ax2.set_xlim()[0]) | (lz>ax2.set_xlim()[1]):
-				continue
-
-			label = line.split('_')[0]
-			if label=='[Ne III]':
-				ax2.text(lz+0.05, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label=='[O III]':
-				ax2.text(lz+0.08, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\beta$':
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			elif label==r'H$\alpha$':
-				ax2.text(lz-0.065, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
-			else:
-				ax2.text(lz, textpoint, va='bottom', ha='center', color='darkgray', s=label, rotation=90, fontsize=10.)
+		_plot_emission_lines(ax2, z_spec, _EMISSION_LINES_GRATING, frame=frame)
 
 	plt.tight_layout()
 	plt.show()
@@ -758,28 +628,15 @@ def get_prism_spectrum_backup(spectra, target, mask_lines=False, clip=False, sig
 		mask = spectra[target][R]['mask']
 
 	if mask_lines==True:
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'OII':[3727.092, 3729.875],
-				 'NeIII':[3968.59, 3869.86],
-				 r'H$\delta$':[4102.8922],
-				 'OIII':[4364.436],
-				 r'H$\beta$':[4862.6830],
-				 '[OIII]':[4960.295,5008.240],
-				 'HeI':[5877.252],
-				 r'H$\alpha$':[6564.608],
-				 'HeI_2':[7065.196]}
-		for line in lines:
-			if line!=r'Ly$\alpha$':
-				dv = 1000. #km/s
-			else:
-				dv = 10000.
-			for lam_cent in lines[line]:
-				zcent = lam_cent*(1.+z_spec)
-				deltalam = (dv/c) * zcent
-				if line!=r'Ly$\alpha$':                
-					zlam_min, zlam_max = zcent-deltalam, zcent+deltalam
+		for line in _MASK_LINES:
+			dv = 10000. if line == r'Ly$\alpha$' else 1000.
+			for lam_cent in _MASK_LINES[line]:
+				zcent = lam_cent * (1. + z_spec)
+				deltalam = (dv / _C_KM_S) * zcent
+				if line == r'Ly$\alpha$':
+					zlam_min, zlam_max = zcent - deltalam, 1500. * (1. + z_spec)
 				else:
-					zlam_min, zlam_max = zcent-deltalam, 1500.*(1.+z_spec)
+					zlam_min, zlam_max = zcent - deltalam, zcent + deltalam
 				mask[gf.find_nearest(lam*10000., zlam_min):gf.find_nearest(lam*10000., zlam_max)+1] = 1
 	mask = mask.astype(int)
 	
@@ -930,435 +787,71 @@ def calibrate_etc_spec(file, mode, add_noise=True, return_cals=False, noise_scal
 
 
 def stack_spectra(stack_flux, stack_err=None, op='median', clip=False, sigma_sig=3.):
-	# Function to create composite spectra and uncertainties from a 2D stack of de-redshifted spectra.
 	# stack_flux : 2D ARRAY of stacked fluxes, in a common reference frame
-	# stack_err : 2D ARRAY of stacked uncertainties associated with stack_flux. These are standard deviations.
+	# stack_err  : 2D ARRAY of stacked uncertainties (standard deviations)
 
-	if type(stack_flux) == list:
+	if isinstance(stack_flux, list):
 		stack_flux = np.array(stack_flux)
 	if stack_err is not None:
-		if type(stack_err) == list:
+		if isinstance(stack_err, list):
 			stack_err = np.array(stack_err)
 
-	iflux = []
-	ierr = []
-	istd = []
-	nstack = []
-
-	for i in range(len(stack_flux.T)):
-		if stack_err is None:
-			mask = (stack_flux.T[i] != 0.) & np.isfinite(stack_flux.T[i])
-		else:
-			mask = (stack_flux.T[i] != 0.) & np.isfinite(stack_flux.T[i]) & (stack_err.T[i] != 0.) & np.isfinite(stack_err.T[i])
-		fluxes = stack_flux.T[i][mask]
-		
-		if clip == False:
-
-			if op == 'median':
-				iflux.append(np.nanmedian(fluxes))
-			elif op == 'mean':
-				iflux.append(np.nanmean(fluxes))
-
-			if len(fluxes) > 1:
-				istd.append(np.nanstd(fluxes, ddof=1) / np.sqrt(len(fluxes)))
-			else:
-				istd.append(0.)
-
-			if stack_err is not None:
-				errors = stack_err.T[i][mask]
-				ierr.append(np.sqrt(np.nansum(errors**2)) / len(errors))
-
-			nstack.append(len(fluxes))
-
-		elif clip == True:
-			fluxes, minval, maxval, idx = custom_sigma_clip(stack_flux.T[i][mask], low=sigma_sig, high=sigma_sig, op=op)
-
-			if op == 'median':
-				iflux.append(np.nanmedian(fluxes))
-			elif op == 'mean':
-				iflux.append(np.nanmean(fluxes))
-
-			if len(fluxes) > 1:
-				istd.append(np.nanstd(fluxes, ddof=1) / np.sqrt(len(fluxes)))
-			else:
-				istd.append(0.)
-
-			if stack_err is not None:
-				errors = stack_err.T[i][mask][idx]
-				ierr.append(np.sqrt(np.nansum(errors**2)) / len(errors))
-
-			nstack.append(len(fluxes))
-
-	iflux = np.array(iflux)
-	istd = np.array(istd)
+	base_mask = (stack_flux != 0.) & np.isfinite(stack_flux)
 	if stack_err is not None:
-		ierr = np.array(ierr)
-	nstack = np.array(nstack)
+		base_mask &= (stack_err != 0.) & np.isfinite(stack_err)
 
-	if stack_err is not None:
-		return iflux, istd, ierr, nstack
+	flux_m = np.where(base_mask, stack_flux, np.nan)
+
+	if clip:
+		mu  = np.nanmedian(flux_m, axis=0) if op == 'median' else np.nanmean(flux_m, axis=0)
+		sig = np.nanstd(flux_m, axis=0)
+		clip_mask = (flux_m >= mu - sig) & (flux_m <= mu + sig)
+		valid = base_mask & clip_mask
 	else:
-		return iflux, istd, nstack
+		valid = base_mask
+
+	flux_m = np.where(valid, stack_flux, np.nan)
+	nstack = valid.sum(axis=0).astype(float)
+
+	if op == 'median':
+		iflux = np.nanmedian(flux_m, axis=0)
+	else:
+		iflux = np.nanmean(flux_m, axis=0)
+
+	std_vals = np.nanstd(flux_m, ddof=1, axis=0)
+	istd = np.where(nstack > 1, std_vals / np.sqrt(nstack), 0.)
+
+	if stack_err is not None:
+		err_m  = np.where(valid, stack_err, np.nan)
+		n_safe = np.where(nstack > 0, nstack, 1.)
+		ierr   = np.sqrt(np.nansum(err_m**2, axis=0)) / n_safe
+		return iflux, istd, ierr, nstack
+	return iflux, istd, nstack
 
 def generate_line_mask(ilam, z_spec=0., dv=2000):
-	# ilam : array of observed wavelengths, in units of Angstroms
-	# z_spec : float, the redshift of the mask
-	# lines : dict, containing the names, rest-frame wavelengths, and dv of the lines to mask
-
-	from astropy.constants import c
-	c = c.to(u.km/u.s).value
-
+	"""
+	ilam : array of observed wavelengths in Angstroms
+	z_spec : redshift of the source
+	dv : velocity width in km/s to mask around each line
+	"""
 	mask = np.zeros_like(ilam)
-		
-	lines = {r'Ly$\alpha$':[1215.67],
-			 'OII':[3727.092, 3729.875],
-			 'NeIII':[3968.59, 3869.86],
-			 r'H$\delta$':[4102.8922],
-			 'OIII':[4364.436],
-			 r'H$\beta$':[4862.6830],
-			 '[OIII]':[4960.295,5008.240],
-			 'HeI':[5877.252],
-			 r'H$\alpha$':[6564.608],
-			 'HeI_2':[7065.196]}
+	lam_min, lam_max = np.nanmin(ilam), np.nanmax(ilam)
 
-	for line in lines:
-			
-		for lam_cent in lines[line]:
-			zcent = lam_cent*(1.+z_spec)
-
-			if (zcent < np.nanmin(ilam)) | (zcent > np.nanmax(ilam)):
+	for line, wavs in _MASK_LINES.items():
+		for lam_cent in wavs:
+			zcent = lam_cent * (1. + z_spec)
+			if (zcent < lam_min) or (zcent > lam_max):
 				continue
-
-			deltalam = (dv/c) * zcent
-			
-			if line!=r'Ly$\alpha$':                
-				zlam_min, zlam_max = zcent-deltalam, zcent+deltalam
+			deltalam = (dv / _C_KM_S) * zcent
+			if line == r'Ly$\alpha$':
+				zlam_min, zlam_max = zcent, 1500. * (1. + z_spec)
 			else:
-				zlam_min, zlam_max = zcent, 1500.*(1.+z_spec)
-			mask[gf.find_nearest(ilam, zlam_min):gf.find_nearest(ilam, zlam_max)+1] = 1
-				
-	mask = mask.astype(int)
-	return mask
+				zlam_min, zlam_max = zcent - deltalam, zcent + deltalam
+			mask[gf.find_nearest(ilam, zlam_min):gf.find_nearest(ilam, zlam_max) + 1] = 1
+
+	return mask.astype(int)
 
 
-
-# class OptimalExtract1D():
-# 	def __init__(self):
-# 		pass
-
-# 	def batch_wavelength_from_wcs(self, datamodel, pix_x, pix_y):
-# 		"""
-# 		Convenience function to grab the WCS object from the
-# 		datamodel's metadata, generate world coordinates from
-# 		the given pixel coordinates, and return the 1D 
-# 		wavelength.
-# 		"""
-		
-# 		wcs = datamodel.meta.wcs
-# 		aC, dC, y = wcs(pix_x, pix_y)
-# 		return y[0]
-	
-# 	def batch_save_extracted_spectrum(self, filename, wavelength, spectrum):
-# 		"""
-# 		Quick & dirty fits dump of an extracted spectrum.
-# 		Replace with your preferred output format & function.
-# 		"""
-		
-# 		wcol = fits.Column(name='wavelength', format='E', 
-# 						   array=wavelength)
-# 		scol = fits.Column(name='spectrum', format='E',
-# 						   array=spectrum)
-# 		cols = fits.ColDefs([wcol, scol])
-# 		hdu = fits.BinTableHDU.from_columns(cols)
-# 		hdu.writeto(filename, overwrite=True)
-	
-# 	def batch_plot_output(self, resampled_image, extraction_bbox, 
-# 					kernel_slice, kernel_model,
-# 					wavelength, spectrum, filename):
-# 		"""
-# 		Convenience function for summary output figures,
-# 		allowing visual inspection of the results from 
-# 		each file being processed.
-# 		"""
-		
-# 		fig, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1, 
-# 											figsize=(8,12))
-# 		fig.suptitle(filename)
-		
-# 		ny, nx = resampled_image.shape
-# 		aspect = nx / (2 * ny)
-		
-# 		# Subplot 1: Extraction region
-# 		power_norm = simple_norm(resampled_image, 'power')
-# 		er_img = ax1.imshow(resampled_image, interpolation='none',
-# 				   aspect=aspect, norm=power_norm, cmap='gray')
-# 		rx, ry, rw, rh = extraction_bbox
-# 		region = Rectangle((rx, ry), rw, rh, facecolor='none', 
-# 						   edgecolor='b', linestyle='--')
-# 		er_ptch = ax1.add_patch(region)
-		
-# 		# Subplot 2: Kernel fit
-# 		xd_pixels = np.arange(kernel_slice.size)
-# 		fit_line = kernel_model(xd_pixels)
-# 		ks_line = ax2.plot(xd_pixels, kernel_slice, label='Kernel Slice')
-# 		kf_line = ax2.plot(xd_pixels, fit_line, 'o', label='Extraction Kernel')
-# 		k_lgd = ax2.legend()
-		
-# 		# Subplot 3: Extracted spectrum
-# 		spec_line = ax3.plot(wavelength, spectrum)
-		
-# 		fig.savefig(filename, bbox_inches='tight')
-# 		plt.close(fig)
-		
-		
-# 	def batch_kernel_slice(self, extraction_region, slice_width=30, column_idx=None, plot=False):
-# 		"""
-# 		Create a slice in the cross-dispersion direction out of the 
-# 		2D array `extraction_region`, centered on `column_idx` and 
-# 		`slice_width` pixels wide. If `column_idx` is not given, use
-# 		the column with the largest total signal.
-# 		"""
-		
-# 		if column_idx is None:
-# 			column_idx = np.argmax(extraction_region.sum(axis=0))
-			
-# 		ny, nx = extraction_region.shape
-# 		half_width = slice_width // 2
-		
-# 		#make sure we don't go past the edges of the extraction region
-# 		to_coadd = np.arange(max(0, column_idx - half_width), 
-# 							 min(nx-1, column_idx + half_width))
-		
-# 		trace = extraction_region[:, to_coadd].sum(axis=1) / slice_width
-		
-# 		if plot==True:
-# 			plt.figure()
-# 			plt.plot(trace)
-# 			plt.show()
-	
-# 		return trace
-	
-	
-# 	def batch_fit_extraction_kernel(self, xd_slice, psf_profile=models.Gaussian1D, 
-# 							  height_param_name='amplitude', height_param_value=None,
-# 							  width_param_name='stddev', width_param_value=1.,
-# 							  center_param_name='mean', center_param_value=None,
-# 							  other_psf_args=[], other_psf_kw={},
-# 							  bg_model=models.Polynomial1D,
-# 							  bg_args=[3], bg_kw={},
-# 							  plot=False):
-# 		"""
-# 		Initialize a composite extraction kernel, then fit it to 
-# 		the 1D array `xd_slice`, which has been nominally
-# 		generated via the `kernel_slice` function defined above. 
-		
-# 		To allow for PSF template models with different parameter 
-# 		names, we use the `height_param_*`, `width_param_*`, and
-# 		`center_param_*` keyword arguments. We collect any other
-# 		positional or keyword arguments for the PSF model in 
-# 		`other_psf_*`. If the height or center values are `None`, 
-# 		they will be calculated from the data.
-		
-# 		Similarly, any desired positional or keyword arguments to
-# 		the background fit model (default `Polynomial1D`) are
-# 		accepted via `bg_args` and `bg_kw`.
-		
-# 		Note that this function can not handle cases which involve
-# 		multiple PSFs for deblending. It is recommended to process
-# 		such spectra individually, using the interactive procedure
-# 		above.
-# 		"""
-# 		xd_pixels = np.arange(xd_slice.size)
-		
-# 		if center_param_value is None:
-# 			center_param_value = np.argmax(xd_slice)
-		
-# 		if height_param_value is None:
-# 			# In case of non-integer values passed via center_param_value,
-# 			# we need to interpolate.
-# 			slice_interp = interp1d(xd_pixels, xd_slice)
-# 			height_param_value = slice_interp(center_param_value)
-		
-# 		# Create the PSF and the background models
-# 		psf_kw = dict([(height_param_name, height_param_value), 
-# 					   (width_param_name, width_param_value),
-# 					   (center_param_name, center_param_value)])
-# 		psf_kw.update(other_psf_kw)
-# 		psf = psf_profile(*other_psf_args, **psf_kw)
-		
-# 		bg = bg_model(*bg_args, **bg_kw)
-		
-# 		composite_kernel = psf + bg
-# 		fitter = fitting.LevMarLSQFitter()
-# 		fit_extraction_kerrnel = fitter(composite_kernel, xd_pixels, xd_slice)
-		
-# 		if plot==True:
-# 			fit_line = fit_extraction_kernel(xd_pixels)
-			
-# 			fig6, (fax6, fln6) = plt.subplots(nrows=2, ncols=1, figsize=(8, 12))
-# 			plt.subplots_adjust(hspace=0.15, top=0.95, bottom=0.05)
-# 			psf6 = fax6.plot(xd_pixels, fit_extraction_kernel[0](xd_pixels), label="PSF")
-# 			poly6 = fax6.plot(xd_pixels, fit_extraction_kernel[1](xd_pixels), label="Background")
-# 			sum6 = fax6.plot(xd_pixels, fit_line, label="Composite Kernel")
-# 			lgd6a = fax6.legend()
-# 			lin6 = fln6.plot(xd_pixels, kernel_slice, label='Kernel Slice')
-# 			fit6 = fln6.plot(xd_pixels, fit_line, 'o', label='Extraction Kernel')
-# 			lgd6b = fln6.legend()
-		
-# 		return fit_extraction_kerrnel
-	
-# 	def batch_fit_trace_centers(self, extraction_region, kernel,
-# 						  trace_model=models.Polynomial1D,
-# 						  trace_args=[0], trace_kw={}):
-# 		"""
-# 		Fit the geometric distortion of the trace with
-# 		a model. Currently this is a placeholder function,
-# 		since geometric distortion is typically removed
-# 		during the `resample` step. However, if this
-# 		functionality is necessary, use this function
-# 		signature to remain compatible with the rest of
-# 		this Appendix.
-# 		"""
-		
-# 		trace_centers = trace_model(*trace_args, **trace_kw)
-# 		trace_centers.c0 = kernel.mean_0
-# 		return trace_centers
-	
-# 	def batch_extract_spectrum(self, extraction_region, trace, kernel, 
-# 						 weights_image, 
-# 						 trace_center_param='mean',
-# 						 scale=1.0):
-# 		"""
-# 		Optimally extract the 1D spectrum from the extraction 
-# 		region.
-		
-# 		A variance image is created from `weights_image` (which 
-# 		should have the same dimensions as `extraction_region`).
-# 		Then, for each column of the spectrum, we sum the aperture
-# 		as per the equations defined above, masking pixels with
-# 		zero weights. 
-		
-# 		Note that unlike the interactive, step-by-step method, 
-# 		here we will vectorize for speed. This requires using
-# 		a model set for the kernel, but this is allowed since
-# 		we are not fitting anything.
-		
-# 		`trace_center_param` is the name of the parameter which 
-# 		will defines the trace centers, *without the model number
-# 		subscript* (since we will be dealing with the components
-# 		individually).
-		
-# 		`scale` is the size ratio of input to output pixels when
-# 		drizzling, equivalent to PIXFRAC in the drizzle parameters
-# 		from the `resample` step.
-# 		"""
-		
-# 		bad_pixels = weights_image == 0.
-# 		masked_wht = np.ma.array(weights_image, mask=bad_pixels)
-# 		variance_image = np.ma.divide(1., masked_wht * scale**4)
-		
-# 		ny, nx = extraction_region.shape
-# 		trace_pixels = np.arange(nx)
-# 		xd_pixels = np.arange(ny)
-# 		trace_centers = trace(trace_pixels) # calculate our trace centers array
-		
-# 		# Create kernel image for vectorizing, which requires some gymnastics...
-# 		# ******************************************************************
-# 		# * IMPORTANT:                                                     *
-# 		# * ----------                                                     *
-# 		# * Note that because of the way model sets are implemented, it is *
-# 		# * not feasible to alter an existing model instance to use them.  *
-# 		# * Instead we'll create a new kernel instance, using the fitted   *
-# 		# * parameters from the original kernel.                           *
-# 		# *                                                                *
-# 		# * Caveat: this assumes that the PSF is the first element, and    *
-# 		# * the background is the second. If you change that when creating *
-# 		# * your composite kernel, make sure you update this section       *
-# 		# * similarly, or it will not work!                                *
-# 		# ******************************************************************
-# 		psf0, bg0 = kernel
-# 		psf_params = {}
-# 		for pname, pvalue in zip(psf0.param_names, psf0.parameters):
-# 			if pname == trace_center_param:
-# 				psf_params[pname] = trace_centers
-# 			else:
-# 				psf_params[pname] = np.full(nx, pvalue)
-# 		psf_set = psf0.__class__(n_models=nx, **psf_params)
-# 		#if not using Polynomial1D for background model, edit this:
-# 		bg_set = bg0.__class__(len(bg0.param_names)-1, n_models=nx)
-# 		for pname, pvalue in zip(bg0.param_names, bg0.parameters):
-# 			setattr(bg_set, pname, np.full(nx, pvalue))
-# 		kernel_set = psf_set + bg_set
-
-# 		# We pass model_set_axis=False so that every model in the set 
-# 		# uses the same input, and we transpose the result to fix the
-# 		# orientation.
-# 		kernel_image = kernel_set(xd_pixels, model_set_axis=False).T
-
-# 		# Normalize the kernel
-# 		for i in range(kernel_image.shape[1]):
-# 			kernel_image[:,i] = np.ma.masked_outside(kernel_image[:,i], 0., np.inf) 
-# 			kernel_image[:,i] = kernel_image[:,i] / np.ma.sum(kernel_image[:,i])
-# 			kernel_image[:,i] = kernel_image[:,i].data
-		
-# 		# Now we perform our weighted sum, using numpy.ma routines
-# 		# to preserve our masks
-# 		g = np.ma.sum(kernel_image**2 / variance_image, axis=0)
-# 		weighted_spectrum = np.ma.divide(kernel_image * extraction_region, variance_image)
-# 		spectrum1d = np.ma.sum(weighted_spectrum, axis=0) / g
-		
-# 		# Any masked values we set to 0.
-# 		return spectrum1d.filled(0.)
-
-# 	def batch_optimal_extraction(self, fitsfile, reg, plot_trace=False, plot_kernel_fit=False, save_spec=False, save_plots=False):
-# 		"""
-# 		Iterate over a list of fits file paths, optimally extract
-# 		the SCI extension in each file, generate an output summary
-# 		image, and then save the resulting spectrum.
-		
-# 		Note that in the example dataset, there is only one SCI
-# 		extension in each file. For data with multiple SCI 
-# 		extensions, a second loop over those extensions is
-# 		required.
-# 		"""
-		
-# 		# For this example data, we'll just use the default values
-# 		# for all the functions
-# 		print("Processing file {}".format(fitsfile))
-# 		dmodel = ImageModel(fitsfile)
-# 		spec2d = dmodel.data
-# 		wht2d = dmodel.wht
-# 		err2d = dmodel.err**2.
-		
-# 		spec2d = spec2d[int(reg[0]-(reg[1]/2)):int(reg[0]+(reg[1]/2)), :]
-# 		wht2d = wht2d[int(reg[0]-(reg[1]/2)):int(reg[0]+(reg[1]/2)), :]
-# 		err2d = err2d[int(reg[0]-(reg[1]/2)):int(reg[0]+(reg[1]/2)), :]
-		
-# 		k_slice = self.batch_kernel_slice(spec2d, plot=plot_trace)
-# 		k_model = self.batch_fit_extraction_kernel(k_slice, plot=plot_kernel_fit)
-# 		trace = self.batch_fit_trace_centers(spec2d, k_model)
-# 		spectrum = self.batch_extract_spectrum(spec2d, trace, k_model, wht2d)
-# 		spectrum = (spectrum * u.MJy).to(u.mJy).value
-# 		spectrum_error = self.batch_extract_spectrum(err2d, trace, k_model, wht2d)
-# 		spectrum_error = (np.sqrt(spectrum_error) * u.MJy).to(u.mJy).value
-		
-# 		ny, nx = spec2d.shape
-# 		y2d, x2d = np.mgrid[:ny, :nx]
-# 		wavelength = self.batch_wavelength_from_wcs(dmodel, x2d, y2d)
-		
-# 		outfile = fitsfile.replace('s2d.fits', 'x1d_optimal')
-# 		if save_plots==True:
-# 			bbox = [0, 0, nx-1, ny-1]
-			
-# 			self.batch_plot_output(spec2d, bbox, k_slice, k_model,
-# 						wavelength, spectrum, 
-# 						outfile+'.png')
-# 		if save_spec==True:
-# 			self.batch_save_extracted_spectrum(outfile+'.fits', wavelength, spectrum)
-
-# 		return wavelength, spectrum, spectrum_error
-
-		
 
 def plot_line_fitting_results(root=None):
 	
