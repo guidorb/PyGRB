@@ -7,8 +7,8 @@ from astropy.visualization import astropy_mpl_style, simple_norm
 from scipy.interpolate import interp1d, RegularGridInterpolator
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from ipywidgets import interact
-import ipywidgets as widgets
+# from ipywidgets import interact
+# import ipywidgets as widgets
 from astropy.stats import sigma_clip
 from copy import copy
 import astropy.units as u
@@ -203,14 +203,18 @@ def MUV_from_spec(ilam, iflux, z, mu=1.):
 	MUV = mUV - 5.*unp.log10(DL) + 5. + 2.5*unp.log10(1+z) + 2.5*unp.log10(mu)
 	return MUV
 
-def MUV_from_photo(fUV, z, fUV_err=0., mu=1.):
+def MUV_from_photo(fUV, z, fUV_err=None, mu=1.):
 	## fUV : UV flux in micro-jy
 	## fUV_err : UV flux error in micro-jy
 	## z : redshift of source
 	## mu : magnification factor
-	mUV = gf.flux_to_AB(fUV*(1.e-6), flux_err=fUV_err*(1.e-6), unit='jy')
 	DL = cosmo.luminosity_distance(z).to(u.pc).value
-	MUV = mUV - 5.*unp.log10(DL) + 5. + 2.5*unp.log10(1+z) + 2.5*unp.log10(mu)
+	if fUV_err is not None:
+		mUV = gf.flux_to_AB(fUV*(1.e-6), flux_err=fUV_err*(1.e-6), unit='jy')
+		MUV = mUV - 5.*unp.log10(DL) + 5. + 2.5*unp.log10(1+z) + 2.5*unp.log10(mu)
+	else:
+		mUV = gf.flux_to_AB(fUV*(1.e-6), unit='jy')
+		MUV = mUV - 5.*np.log10(DL) + 5. + 2.5*np.log10(1+z) + 2.5*np.log10(mu)
 	return MUV
 
 def R_Sanders(R, Rerr=None, Rtype='R23', xlims=[7.,8.01]):
@@ -298,225 +302,7 @@ def bin_1d_spec(lam, spec1d, err1d=None, factor=1, method='median'):
 	else:
 		return ilam, ispec
 
-def plot_prism_spectrum_backup(spectra, target, space='pix', frame='obs', clim=(-0.015,0.03), ylims='auto', xlims=None, units='mujy', plot_model=False, plot_photo_model=False, mask_lines=False, plot_clipped=False, plot_lines=None, sigma=3., correct_slitloss=False):
-	
-	tab = ascii.read('/Users/guidorb/Dropbox/Postdoc/highz_galaxies_combined.dat')
-	
-	R = 'prism' # 'prism' or 'grism'
-	
-	itab = np.where(tab['name'] == target)[0]
-	z_spec = tab['z_spec'][itab]
-	
-	lam, flux, err = spectra[target][R]['lam'], spectra[target][R]['flux'], spectra[target][R]['err']
-	if 'mask' not in spectra[target][R]:
-		mask = np.zeros_like(lam)
-	else:
-		mask = spectra[target][R]['mask']
-		
-	if mask_lines==True:
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'OII':[3727.092, 3729.875],
-				 'NeIII':[3968.59, 3869.86],
-				 'H$\delta$':[4102.8922],
-				 'OIII':[4364.436],
-				 r'H$\beta$':[4862.6830],
-				 '[OIII]':[4960.295,5008.240],
-				 'HeI':[5877.252],
-				 r'H$\alpha$':[6564.608],
-				 'HeI_2':[7065.196]}
-
-		for line in lines:
-			if line!=r'Ly$\alpha$':
-				dv = 1000. #km/s
-			else:
-				dv = 10000.
-				
-			for lam_cent in lines[line]:
-				zcent = lam_cent*(1.+z_spec)
-				deltalam = (dv/c) * zcent
-				
-				if line!=r'Ly$\alpha$':                
-					zlam_min, zlam_max = zcent-deltalam, zcent+deltalam
-				else:
-					zlam_min, zlam_max = zcent-deltalam, 1500.*(1.+z_spec)
-				mask[gf.find_nearest(lam*10000., zlam_min):gf.find_nearest(lam*10000., zlam_max)+1] = 1
-				
-	mask = mask.astype(int)
-		
-	im = spectra[target][R]['2d']
-	xvals = np.arange(0,np.shape(im)[1],1)
-	
-	fig = plt.figure(figsize=(10.,6.))
-	gs = gridspec.GridSpec(nrows=2, ncols=1, height_ratios=[0.25,0.75])
-	ax1 = fig.add_subplot(gs[0])
-	ax1.imshow(im, origin='lower', cmap='magma', clim=clim, aspect='auto')
-	ycent = int(np.shape(im)[0]/2)
-	ax1.set_ylim(0,np.shape(im)[0])
-	ax1.set_ylim(ycent-10,ycent+10)
-	ax1.set_xlim(0,np.shape(im)[1])
-	gf.style_axes(ax1)
-	ax1.set_xticklabels([])
-	ax1.set_yticks([])
-	ax1.set_yticklabels([])
-	
-	ax2 = fig.add_subplot(gs[1])
-	if 'photo' in spectra[target]:
-		ip = np.where(spectra[target]['photo']['filters'] == ('/Users/guidorb/Dropbox/Postdoc/filters/'+spectra[target]['photo']['normfilt']))[0][0]
-		photo = spectra[target]['photo']['flux_aper'][ip]
-		spec_photo = gf.photo_from_filter(lam, flux, filt=spectra[target]['photo']['normfilt'])
-		ratio = photo/spec_photo
-		flux = flux * ratio
-		err = err * ratio
-
-		if correct_slitloss==True:
-			slitloss = []
-			for ip in range(len(spectra[target]['photo']['filters'])):
-				p = gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip])
-				fl = gf.photo_from_filter(lam, flux, filt=spectra[target]['photo']['filters'][ip].split('/')[-1])
-
-				if lam[p] > 1.45:
-					slitloss.append([lam[p], spectra[target]['photo']['flux_aper'][ip] / fl])
-			slitloss = np.array(slitloss)
-
-			poly = np.polyfit(slitloss.T[0], slitloss.T[1], 2)
-			yslitloss = np.polyval(poly, lam)
-			yslitloss[(lam < 1.45)] = 1.
-			flux = flux * yslitloss
-
-	
-	if plot_clipped==True:
-		masked = np.ma.masked_array(flux, mask=mask)
-		values = sigma_clip(masked, sigma=sigma, maxiters=5, cenfunc='median', stdfunc='std', masked=True)
-		values.mask[(masked.mask == True)] = True
-		mask[(values.mask==True)] = 1
-	
-	if space=='pix':
-		# ax2.step(xvals, flux, color='purple', linewidth=1.5)
-		ax2.step(xvals, flux, color='C0', linewidth=1.5)
-		if plot_clipped==True:
-			ax2.step(xvals, values, color='turquoise', linewidth=1.5)
-		
-		if plot_model==True:
-			# mod = pyfits.open(f'/Volumes/GRBHD/JWST/gsf/output/gsf_spec_{target}.fits')
-			mod = pyfits.open(f'/Users/guidorb/Dropbox/papers/z5_Templates/gsf/output/gsf_spec_{target}.fits')
-			lam_mod, flux_mod = mod[1].data['wave_model'], mod[1].data['f_model_noline_50']*(1.e-19)
-			flux_mod = gf.flam_to_fnu(lam_mod, flux_mod) * (1.e23) * (1.e6)
-			lam_mod = lam_mod / 10000.
-			model = np.interp(lam, lam_mod, flux_mod)
-			ax2.plot(xvals, model, color='cornflowerblue', linewidth=2.)
-
-		if plot_photo_model==True:
-			# mod = pyfits.open(f'/Volumes/GRBHD/JWST/gsf/output/gsf_spec_{target}.fits')
-			mod = pyfits.open(f'/Users/guidorb/Dropbox/papers/z5_Templates/gsf/output_photo/gsf_spec_{target}.fits')
-			lam_mod, flux_mod = mod[1].data['wave_model'], mod[1].data['f_model_noline_50']*(1.e-19)
-			flux_mod = gf.flam_to_fnu(lam_mod, flux_mod) * (1.e23) * (1.e6)
-			lam_mod = lam_mod / 10000.
-			model = np.interp(lam, lam_mod, flux_mod)
-			ax2.plot(xvals, model, color='darkorange', linewidth=2.)
-		
-		ax2.set_xlim(0,np.shape(im)[1])
-		xtickvals = [0.6,1.,2.,3.,4.,5.]
-		xticks = []
-		for l in xtickvals:
-			i = gf.find_nearest(lam, l)
-			xticks.append(i)
-		ax2.set_xticks(xticks)
-		if frame=='obs':
-			ax2.set_xticklabels(np.array(xtickvals).astype(str))
-		elif frame=='rest':
-			ax2.set_xticklabels((np.array(xtickvals)/(1.+z_spec)).astype(str))
-		
-		ax1.set_xticks(xticks)
-	elif space=='lam':
-		# ax2.step(lam, flux, color='purple', linewidth=1.5)
-		ax2.step(lam, flux, color='C0', linewidth=1.5)
-		ax2.set_xlim(np.nanmin(lam), np.nanmax(lam))
-		
-		if plot_clipped==True:
-			ax2.step(lam, values, color='turquoise', linewidth=1.5)
-		
-		if plot_model==True:
-			# mod = pyfits.open(f'/Volumes/GRBHD/JWST/gsf/output/gsf_spec_{target}.fits')
-			mod = pyfits.open(f'/Users/guidorb/Dropbox/papers/z5_Templates/gsf/output/gsf_spec_{target}.fits')
-			lam_mod, flux_mod = mod[1].data['wave_model'], mod[1].data['f_model_noline_50']*(1.e-19)
-			flux_mod = gf.flam_to_fnu(lam_mod, flux_mod) * (1.e23) * (1.e6)
-			lam_mod = lam_mod / 10000.
-			model = np.interp(lam, lam_mod, flux_mod)
-			# ax2.plot(lam, model, color='cornflowerblue', linewidth=2.)
-			ax2.plot(lam, model, color='darkred', linewidth=2.)
-	
-	ax2.plot(ax2.set_xlim(), [0.,0.], linestyle='--', color='black')
-	if frame=='obs':
-		# gf.style_axes(ax2, r'$\lambda_{\rm obs.}$', r'$F_{\nu}$ [$\mu$Jy]')
-		gf.style_axes(ax2, r'Observed Wavelength [$\mu$m]', r'Flux Density [$\mu$Jy]')
-	elif frame=='rest':
-		# gf.style_axes(ax2, r'$\lambda_{\rm rest}$', r'$F_{\nu}$ [$\mu$Jy]')
-		gf.style_axes(ax2, r'Rest Wavelength [$\mu$m]', r'Flux Density [$\mu$Jy]')
-	
-	if ylims==None:
-		ax2.set_ylim(ax2.set_ylim())
-	elif (ylims=='auto'):
-		low = np.nanmin(flux[(lam < 1.) & (lam > 0.8)])
-		if low >= 0.:
-			low = -low
-		low = low + (low * 1.75)
-		
-		high = np.nanmax(flux[(lam > 1.) & (lam < 2.)])
-		high = high + (high * 3.)
-		ax2.set_ylim(low, high)
-	else:
-		ax2.set_ylim(ylims[0],ylims[1])
-		
-	if xlims==None:
-		ax2.set_xlim(ax2.set_xlim())
-	else:
-		if space=='pix':
-			ax1.set_xlim(gf.find_nearest(lam, xlims[0]), gf.find_nearest(lam, xlims[1]))
-			ax2.set_xlim(gf.find_nearest(lam, xlims[0]), gf.find_nearest(lam, xlims[1]))
-		elif space=='lam':
-			ax1.set_xlim(xlims[0], xlims[1])
-			ax2.set_xlim(xlims[0], xlims[1])
-	
-	if space=='pix':
-		ax2.fill_between(xvals, np.ones_like(xvals)*ax2.set_ylim()[0], np.ones_like(xvals)*ax2.set_ylim()[1], color='silver', where=(mask==1))
-	elif space=='lam':
-		ax2.fill_between(lam, np.ones_like(lam)*ax2.set_ylim()[0], np.ones_like(lam)*ax2.set_ylim()[1], color='silver', where=(mask==1))
-	
-	if 'photo' in spectra[target]:
-		# p = gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip])
-		# p_err = np.mean([p-gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip]-spectra[target]['photo']['lam_err'][ip]),gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip]+spectra[target]['photo']['lam_err'][ip])-p])
-		# ax2.errorbar(p, spectra[target]['photo']['flux_aper'][ip], xerr=p_err, yerr=spectra[target]['photo']['flux_aper_err'][ip], marker='o', ecolor='navy', color='dodgerblue', markeredgecolor='navy', zorder=50)
-	
-		for ip in range(len(spectra[target]['photo']['filters'])):
-			p = gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip])
-			p_err = np.mean([p-gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip]-spectra[target]['photo']['lam_err'][ip]),gf.find_nearest(lam, spectra[target]['photo']['lam_cent'][ip]+spectra[target]['photo']['lam_err'][ip])-p])
-			ax2.errorbar(p, spectra[target]['photo']['flux_aper'][ip], xerr=p_err, yerr=spectra[target]['photo']['flux_aper_err'][ip], marker='o', ecolor='black', color='gray', markeredgecolor='black')
-
-			fl = gf.photo_from_filter(lam, flux, filt=spectra[target]['photo']['filters'][ip].split('/')[-1])
-			ax2.errorbar(p, fl, marker='s', color='white', markeredgecolor='darkred', markeredgewidth=2.)
-
-
-	ax2.annotate(xy=(0.025,0.9), xycoords=('axes fraction'), text=target+r', $z_{\rm spec.}=%0.3f$'%(z_spec), fontsize=15)
-	
-
-	midpoint = ax2.set_ylim()[0] + ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) / 2.)
-	highpoint = ax2.set_ylim()[1] - ((ax2.set_ylim()[1] - ax2.set_ylim()[0]) / 4.)
-	if plot_lines is not None:
-		for l in plot_lines:
-			lz = (l/10000.) * (1.+z_spec)
-			lz = gf.find_nearest(lam, lz)
-			# ax2.plot([l,l], ax2.set_ylim(), linestyle='--', linewidth=1.5, color='green')
-			ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', linewidth=1.5, color='darkred')
-
-	plt.tight_layout()
-	plt.show()
-	
-	if plot_model==False:
-		return lam, flux, err, mask
-	else:
-		return lam, flux, err, mask, model
-
-def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=None, xlims=None, plot_model=False, mask_lines=False, plot_clipped=False, plot_lines=True):
+def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=None, xlims=None, plot_model=False, mask_lines=False, plot_clipped=False, plot_lines=True, lines_to_plot=None):
 	fcat = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full.dat')
 	
 	R = 'prism-clear' # 'prism' or 'grism'
@@ -660,26 +446,29 @@ def plot_prism_spectrum(spectra, msaid, frame='obs', clim=(-0.04,0.09), ylims=No
 		# 	ax2.plot([lz,lz], [midpoint,highpoint], linestyle='--', linewidth=1.5, color='darkgrey')
 		# 	ax2.text(lz, textpoint, s=line, color='darkgrey', va='bottom', ha='center', fontsize=10, rotation=90)
 
-		lines = {r'Ly$\alpha$':[1215.67],
-				 'C IV':[np.mean([1548.187,1550.772])],
-				 r'He II + O III]':[1640.42,np.mean([1660.809,1666.150])],
-				 r'C III]':[1908.734],
-				 # 'Mg II]':[2799.1165],
-				 # 'He I UV':[2945.106],
-				 '[O II]':[3728.4835000000003],
-				 '[Ne III]':[3968.59, 3869.86],
-				 r'H$\delta$':[4102.8922],
-				 r'H$\gamma$ + [O III]':[4353.05985],
-				 r'He I_1':[4472.734],
-				 r'He II':[4687.015],
-				 r'H$\beta$':[4862.6830],
-				 '[O III]':[4960.295,5008.240],
-				 'He I_2':[5877.252],
-				 '[O I]':[6302.046],
-				r'H$\alpha$':[6564.608],
-				 '[S II]':[6725.4845000000005],
-				 'He I_3':[7065.196]
-				 }
+		if lines_to_plot!=None:
+			lines = lines_to_plot.copy()
+		else:
+			lines = {r'Ly$\alpha$':[1215.67],
+					 'C IV':[np.mean([1548.187,1550.772])],
+					 r'He II + O III]':[1640.42,np.mean([1660.809,1666.150])],
+					 r'C III]':[1908.734],
+					 # 'Mg II]':[2799.1165],
+					 # 'He I UV':[2945.106],
+					 '[O II]':[3728.4835000000003],
+					 '[Ne III]':[3968.59, 3869.86],
+					 r'H$\delta$':[4102.8922],
+					 r'H$\gamma$ + [O III]':[4353.05985],
+					 r'He I_1':[4472.734],
+					 r'He II':[4687.015],
+					 r'H$\beta$':[4862.6830],
+					 '[O III]':[4960.295,5008.240],
+					 'He I_2':[5877.252],
+					 '[O I]':[6302.046],
+					r'H$\alpha$':[6564.608],
+					 '[S II]':[6725.4845000000005],
+					 'He I_3':[7065.196]
+					 }
 		
 		for line in lines:
 			for l in lines[line]:
@@ -1115,7 +904,7 @@ def calibrate_etc_spec(file, mode, add_noise=True, return_cals=False, noise_scal
 	import pickle
 	from astropy.io import fits as pyfits
 	
-	calibrations = pickle.load(open('/Users/guidorb/Dropbox/Applications/Proposals/ETC_Flux_Calibrations/ETC_flux_calibrations.p', "rb"), encoding='latin1')
+	calibrations = pickle.load(open('/Users/guidorb/Dropbox/Admin/Proposals/ETC_Flux_Calibrations/ETC_flux_calibrations.p', "rb"), encoding='latin1')
 	cal_lam, cal_resp = calibrations[mode]['lam'], calibrations[mode]['cal']
 	
 	if file[-1]=='/':
@@ -1145,55 +934,71 @@ def stack_spectra(stack_flux, stack_err=None, op='median', clip=False, sigma_sig
 	# stack_flux : 2D ARRAY of stacked fluxes, in a common reference frame
 	# stack_err : 2D ARRAY of stacked uncertainties associated with stack_flux. These are standard deviations.
 
-	if type(stack_flux)==list:
+	if type(stack_flux) == list:
 		stack_flux = np.array(stack_flux)
 	if stack_err is not None:
-		if type(stack_err)==list:
+		if type(stack_err) == list:
 			stack_err = np.array(stack_err)
 
 	iflux = []
 	ierr = []
 	istd = []
 	nstack = []
+
 	for i in range(len(stack_flux.T)):
-		if clip==False:
-			if op=='median':
-				iflux.append(np.nanmedian(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
-				istd.append(np.nanstd(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
-				if stack_err is not None:
-					ierr.append(np.nanmedian(stack_err.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]**2.))
-			elif op=='mean':
-				iflux.append(np.nanmean(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
-				istd.append(np.nanstd(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]))
-				if stack_err is not None:
-					ierr.append(np.nanmean(stack_err.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)]**2.))
-			nstack.append(len(stack_flux.T[i][(stack_flux.T[i] != 0.)]))
-		elif clip==True:
-			flux_arr, minval, maxval, ival = custom_sigma_clip(stack_flux.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)], low=sigma_sig, high=sigma_sig, op=op)
+		if stack_err is None:
+			mask = (stack_flux.T[i] != 0.) & np.isfinite(stack_flux.T[i])
+		else:
+			mask = (stack_flux.T[i] != 0.) & np.isfinite(stack_flux.T[i]) & (stack_err.T[i] != 0.) & np.isfinite(stack_err.T[i])
+		fluxes = stack_flux.T[i][mask]
+		
+		if clip == False:
+
+			if op == 'median':
+				iflux.append(np.nanmedian(fluxes))
+			elif op == 'mean':
+				iflux.append(np.nanmean(fluxes))
+
+			if len(fluxes) > 1:
+				istd.append(np.nanstd(fluxes, ddof=1) / np.sqrt(len(fluxes)))
+			else:
+				istd.append(0.)
+
 			if stack_err is not None:
-				err_arr = stack_err.T[i][(stack_flux.T[i] != 0.) & (np.isfinite(stack_flux.T[i])==True)][ival]
-			if op=='median':
-				iflux.append(np.nanmedian(flux_arr))
-				istd.append(np.nanstd(flux_arr))
-				if stack_err is not None:
-					ierr.append(np.nanmedian(err_arr**2.))
-			elif op=='mean':
-				iflux.append(np.nanmean(flux_arr))
-				istd.append(np.nanstd(flux_arr))
-				if stack_err is not None:
-					ierr.append(np.nanmean(err_arr**2.))
-			nstack.append(len(flux_arr))
+				errors = stack_err.T[i][mask]
+				ierr.append(np.sqrt(np.nansum(errors**2)) / len(errors))
+
+			nstack.append(len(fluxes))
+
+		elif clip == True:
+			fluxes, minval, maxval, idx = custom_sigma_clip(stack_flux.T[i][mask], low=sigma_sig, high=sigma_sig, op=op)
+
+			if op == 'median':
+				iflux.append(np.nanmedian(fluxes))
+			elif op == 'mean':
+				iflux.append(np.nanmean(fluxes))
+
+			if len(fluxes) > 1:
+				istd.append(np.nanstd(fluxes, ddof=1) / np.sqrt(len(fluxes)))
+			else:
+				istd.append(0.)
+
+			if stack_err is not None:
+				errors = stack_err.T[i][mask][idx]
+				ierr.append(np.sqrt(np.nansum(errors**2)) / len(errors))
+
+			nstack.append(len(fluxes))
+
 	iflux = np.array(iflux)
 	istd = np.array(istd)
 	if stack_err is not None:
-		ierr = np.sqrt(ierr)
+		ierr = np.array(ierr)
 	nstack = np.array(nstack)
 
 	if stack_err is not None:
 		return iflux, istd, ierr, nstack
 	else:
 		return iflux, istd, nstack
-
 
 def generate_line_mask(ilam, z_spec=0., dv=2000):
 	# ilam : array of observed wavelengths, in units of Angstroms

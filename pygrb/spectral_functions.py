@@ -139,7 +139,7 @@ class LineFitting:
 
 
 				# Define the model
-				fit_model = models.Gaussian1D(amplitude=np.nanmax(yfit), mean=zline, stddev=60.) + models.Linear1D(slope=0., intercept=0.)
+				fit_model = models.Gaussian1D(amplitude=np.nanmax(yfit), mean=zline, stddev=15.) + models.Linear1D(slope=0., intercept=0.)
 				fit_model.amplitude_0.min = 0.
 				fit_model.amplitude_0.max = np.nanmax(yfit)
 				fit_model.amplitude_0.fixed = False
@@ -470,7 +470,10 @@ class LineFitting:
 						line_model.amplitude.min = 0.
 						line_model.amplitude.max = np.nanmax(yfit[(xfit > (zline - 100.)) & (xfit < (zline + 100.))])
 						line_model.amplitude.fixed = False
-						line_model.stddev.min = 20.
+						if R==100:
+							line_model.stddev.min = 20.
+						else:
+							line_model.stddev.min = 1.
 						line_model.stddev.fixed = False
 						line_model.mean.min = zline - 100.
 						line_model.mean.max = zline + 100.
@@ -940,7 +943,7 @@ def inverse_variance_mean(flux_array, error_array):
 			2D array of shape (N, n) containing associated uncertainties.
 
 	Returns:
-		combined_wavelength, combined_flux, combined_error: np.ndarray
+		combined_flux, combined_error: np.ndarray
 			Arrays representing the combined spectrum.
 	"""
 	if type(flux_array) == list:
@@ -957,6 +960,66 @@ def inverse_variance_mean(flux_array, error_array):
 	# Weighted mean calculation
 	combined_flux = np.nansum(flux_array * weights, axis=0) / np.nansum(weights, axis=0)
 	combined_error = np.sqrt(1. / np.nansum(weights, axis=0))
+
+	return combined_flux, combined_error
+
+def inverse_variance_mean_sigma_clip(flux_array, error_array, sigma=3.0):
+	"""
+	Combine multiple spectra using inverse-variance weighting with per-pixel sigma clipping.
+
+	Parameters:
+		flux_array : np.ndarray
+			2D array of shape (N, n) with flux values in Jy.
+		error_array : np.ndarray
+			2D array of shape (N, n) with flux uncertainties in Jy.
+		sigma : float
+			Sigma threshold for clipping. Default = 3.
+
+	Returns:
+		combined_flux, combined_error : np.ndarray
+			The combined spectrum (flux and 1σ error), both in Jy.
+	"""
+
+	# Ensure arrays
+	flux_array = np.array(flux_array)
+	error_array = np.array(error_array)
+
+	if flux_array.shape != error_array.shape:
+		raise ValueError("Flux and error arrays must have the same shape.")
+
+	N, n = flux_array.shape
+
+	# Array to hold clipped flux/error
+	clipped_flux = flux_array.copy()
+	clipped_error = error_array.copy()
+
+	# Loop over wavelength bins and sigma-clip
+	for i in range(n):
+		f = flux_array[:, i]
+		e = error_array[:, i]
+
+		# Compute mean and std using inverse variance weights
+		w = 1.0 / e**2
+		weighted_mean = np.nansum(f * w) / np.nansum(w)
+		weighted_std  = np.sqrt(1.0 / np.nansum(w))   # standard weighted error
+
+		# Sigma clipping mask
+		mask = np.abs(f - weighted_mean) <= sigma * weighted_std
+
+		# Apply mask (set clipped values to NaN)
+		clipped_flux[:, i][~mask]  = np.nan
+		clipped_error[:, i][~mask] = np.nan
+
+	# Now compute inverse-variance weighted mean on clipped data
+	weights = 1.0 / clipped_error**2
+	weights[np.isnan(weights)] = 0.0
+
+	combined_flux = (
+		np.nansum(clipped_flux * weights, axis=0) /
+		np.nansum(weights, axis=0)
+	)
+
+	combined_error = np.sqrt(1.0 / np.nansum(weights, axis=0))
 
 	return combined_flux, combined_error
 
@@ -2206,3 +2269,80 @@ def fit_emission_lines(filename, z_stack=None, Av=0.):
 	plt.show()
 		
 	return best_params, best_params_err, cards
+
+def gaussian_smooth_spectrum(wave, flux, error, sigma_A, nan_policy="omit"):
+	"""
+	Gaussian-kernel smooth a 1D spectrum in wavelength space, with
+	errors propagated consistently but NOT used as weights.
+
+	Parameters
+	----------
+	wave : array_like
+		Wavelength array in Angstroms (1D).
+	flux : array_like
+		Flux array (same shape as wave).
+	error : array_like
+		1σ uncertainty on flux (same shape as wave).
+	sigma_A : float
+		Gaussian kernel sigma in Angstroms.
+		(FWHM ≈ 2.355 * sigma_A)
+	nan_policy : {'omit', 'propagate'}
+		- 'omit': ignore NaNs in flux/error when smoothing (recommended)
+		- 'propagate': NaNs in inputs usually yield NaNs in outputs.
+
+	Returns
+	-------
+	smooth_flux : np.ndarray
+		Smoothed flux array (same shape as input).
+	smooth_error : np.ndarray
+		Smoothed 1σ uncertainty array (same shape as input).
+	"""
+	wave = np.asarray(wave)
+	flux = np.asarray(flux)
+	error = np.asarray(error)
+
+	if wave.shape != flux.shape or flux.shape != error.shape:
+		raise ValueError("wave, flux, and error must have the same shape")
+
+	N = wave.size
+	smooth_flux = np.empty_like(flux, dtype=float)
+	smooth_error = np.empty_like(error, dtype=float)
+
+	# Precompute wavelength differences and Gaussian kernel
+	dlam = wave[None, :] - wave[:, None]          # shape (N, N)
+	kernel = np.exp(-0.5 * (dlam / sigma_A)**2)   # Gaussian kernel
+
+	for j in range(N):
+		w = kernel[j, :]
+
+		if nan_policy == "omit":
+			good = np.isfinite(flux) & np.isfinite(error)
+			# Restrict to good points only
+			f_j = flux[good]
+			e_j = error[good]
+			w_j = w[good]
+		elif nan_policy == "propagate":
+			f_j = flux
+			e_j = error
+			w_j = w
+		else:
+			raise ValueError("nan_policy must be 'omit' or 'propagate'")
+
+		w_sum = np.sum(w_j)
+		if w_sum <= 0 or not np.isfinite(w_sum) or f_j.size == 0:
+			smooth_flux[j] = np.nan
+			smooth_error[j] = np.nan
+			continue
+
+		# Normalized weights
+		w_norm = w_j / w_sum
+
+		# Smoothed flux: Gaussian weighted average
+		smooth_flux[j] = np.sum(w_norm * f_j)
+
+		# Propagate variance using same weights:
+		# Var(F_j) = sum( w_norm^2 * σ_i^2 )
+		var_j = np.sum((w_norm**2) * (e_j**2))
+		smooth_error[j] = np.sqrt(var_j)
+
+	return smooth_flux, smooth_error

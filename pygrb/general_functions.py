@@ -35,7 +35,7 @@ import os
 class load_jewels:
 	def __init__(self, load_z10=False):
 		self.tab = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full.dat')
-		self.spectra = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_18April2025_full.p', "rb"), encoding='latin1')
+		self.spectra = pickle.load(open('/Users/guidorb/Dropbox/Catalogs/JEWELS/spectra_27Jan2026_full.p', "rb"), encoding='latin1')
 		self.coords = SkyCoord(self.tab['ra'], self.tab['dec'], unit=(u.deg,u.deg))
 		self.line_fluxes = ascii.read('/Users/guidorb/Dropbox/Catalogs/JEWELS/highz_msaid_full_linefluxes.cat')
 
@@ -49,10 +49,19 @@ class load_jewels:
 		f.close()
 
 		if load_z10==True:
-			self.z10_cat = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_unique_sample.cat')
-			self.z10_props = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_properties.cat')
+			self.z10_tab = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_unique_sample.cat')
+			self.z10_props = ascii.read('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_sample_properties_updated.cat')
 			self.z10_spec = pickle.load(open('/Users/guidorb/Dropbox/papers/z10_Demographics/z10_spectral_catalog_unique.p', "rb"), encoding='latin1')
+			self.z10_coords = SkyCoord(self.z10_tab['ra'], self.z10_tab['dec'], unit=(u.deg,u.deg))
 
+	def get_photoz(self, coord):
+		# coord : string of the ra and dec (not commas) in degrees
+		c = SkyCoord(coord, unit=(u.deg,u.deg))
+		seps = c.separation(self.astrodeep_coords).arcsec
+		i = np.argmin(seps)
+		print('Closest separation : %0.2f arcsec'%(seps[i]))
+		for key in ['zphot','EAzY_eazy_v13','EAzY_Larson','EAzY_LarsonLyaRed']:
+			print(key,': %0.3f'%self.astrodeep_zphot[key][i])
 
 	def plot_prism_spectrum(self, msaid, **kwargs):
 		af.plot_prism_spectrum(self.spectra, msaid, **kwargs)
@@ -124,7 +133,7 @@ class load_jewels:
 		f.close()
 		print(f'Written to file: ./{msaid}_nirspec_prism.txt')
 
-	def get_entry(self, msaid, with_header=False, print_output=True):
+	def get_info(self, msaid, with_header=False, print_output=True):
 		try:
 			i = np.where(self.tab['msaid'] == msaid)[0][0]
 			ra, dec, z, mu, AB = self.tab['ra'][i], self.tab['dec'][i], self.tab['z'][i], self.tab['mu'][i], self.tab['AB'][i]
@@ -137,6 +146,38 @@ class load_jewels:
 		except:
 			print('This MSA-ID entry does not exist.')
 
+	def plot_msaexp_spectrum(self, file, xlim=None, ylim=None, with_error=False):
+		
+		f = pyfits.open(file)
+
+		fig = plt.figure(figsize=(8.,4.5))
+		ax = fig.add_subplot(111)
+		if with_error==True:
+			ax.fill_between(f[1].data['wave'], f[1].data['flux']-f[1].data['err'], f[1].data['flux']+f[1].data['err'], color='grey', alpha=0.4, step='pre')
+		ax.step(f[1].data['wave'], f[1].data['flux'], linewidth=1.5, color='C0')
+		if xlim==None:
+			ax.set_xlim(min(f[1].data['wave']), max(f[1].data['wave']))
+		else:
+			ax.set_xlim(xlim[0],xlim[1])
+
+		std = np.nanstd(f[1].data['flux'])
+		if ylim==None:
+			ax.set_ylim(-1.*std, 3.*std)
+		else:
+			ax.set_ylim(ylim[0], ylim[1])
+
+		style_axes(ax, r'$\lambda_{\rm obs}$ [$\mu$m]', r'$F_{\nu}$ [$\mu$Jy]')
+		plt.tight_layout()
+		plt.show()
+
+		f.close()
+
+	def load_msaexp_spectrum(self, file):
+
+		f = pyfits.open(file)
+		lam, flux, err = f[1].data['wave'], f[1].data['flux'], f[1].data['err']
+		f.close()
+		return lam, flux, err
 
 
 
@@ -413,7 +454,7 @@ def photo_from_filter(wave, spectrum, spectrum_err=None, filt=None):
 
 	photo = np.nansum(spectrum * response)/np.nansum(response)
 	if spectrum_err is not None:
-		photo_err = np.nansum((spectrum_err**2.) * response)/np.nansum(response)
+		photo_err = np.sqrt(np.nansum((spectrum_err**2.) * response)/np.nansum(response))
 		return photo, photo_err
 	else:
 		return photo
@@ -486,6 +527,30 @@ def lighten_color(color, amount=1.):
 	c = colorsys.rgb_to_hls(*mc.to_rgb(c))
 	rgbval = colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
 	return rgbval
+
+import matplotlib.colors as mcolors
+
+def adjust_color(color, amount=0.5):
+	"""
+	Lighten or darken a matplotlib color.
+
+	Parameters
+	----------
+	color : str or tuple
+		Matplotlib color (name, hex, RGB(A) tuple, or XKCD color).
+	amount : float
+		Factor to adjust the color:
+		- 0 < amount < 1 → darker (closer to black).
+		- amount > 1     → lighter (closer to white).
+		- Example: 0.8 darkens by 20%, 1.2 lightens by 20%.
+
+	Returns
+	-------
+	tuple
+		Adjusted RGB tuple.
+	"""
+	rgb = mcolors.to_rgb(color)  # Handles hex, named, and XKCD colors
+	return tuple(min(1, max(0, x * amount if amount < 1 else 1 - (1 - x) / amount)) for x in rgb)
 
 def get_continuous_cmap(hex_list, float_list=None):
 	import matplotlib.colors as mcolors
@@ -784,7 +849,7 @@ def plot_filters(filt='all', z=7.):
 	fig = plt.figure(figsize=(10.,6.))
 	ax = fig.add_subplot(111)
 	ax.step(ilam, iflux, color='darkgrey', linewidth=1.25)
-	ax.set_xlim(0.5,6.)
+	ax.set_xlim(0.4,6.)
 	ax.set_xticks(np.arange(1.,7.,1))
 	ax.set_ylim(-1.,3.5)
 	
@@ -870,26 +935,34 @@ def plot_filters(filt='all', z=7.):
 
 
 	if filt in ['NIRSpec','all']:
-		jwst_nirspec = ['JWST_NIRSpec.F140X',
-						'JWST_NIRSpec.CLEAR',
-						'JWST_NIRSpec.F110W']
-		for ext in jwst_nirspec:
-			f = ascii.read(f'/Users/guidorb/Dropbox/Postdoc/filters/{ext}')
-			lam_cent, _, _ = get_filter_info(ext, output_unit='mu')
-			if (lam_cent < ax.set_xlim()[0]) | (lam_cent > ax.set_xlim()[1]):
-				continue
-			f['col1'] = f['col1'] / 10000.
-			f['col2'] = ((f['col2'] / np.nanmax(f['col2'])) * (ax.set_ylim()[0] + ((ax.set_ylim()[1] - ax.set_ylim()[0]) * 0.475))) + ax.set_ylim()[0]
-			ax.plot(f['col1'], f['col2'], color='lightseagreen', linewidth=1.25)
-			filtname = ext.split('.')[-1]
-			ax.text(np.mean(f['col1']), np.max(f['col2']+0.2), s=filtname, color='lightseagreen', fontsize=10, ha='center')
-		ax.plot(f['col1'], f['col2'], color='lightseagreen', linewidth=1.25, label='JWST/NIRSpec')
-			
-	
-		ax.plot([0.7,1.27], [1.,1.], color='steelblue', linewidth=1.5, linestyle='--')
-		ax.plot([0.97,1.89], [1.2,1.2], color='steelblue', linewidth=1.5, linestyle='--')
-		ax.plot([1.66,3.17], [1.3,1.3], color='steelblue', linewidth=1.5, linestyle='--')
-		ax.plot([2.87,5.27], [1.4,1.4], color='steelblue', linewidth=1.5, linestyle='--')
+		# jwst_nirspec = ['JWST_NIRSpec.F140X',
+		# 				'JWST_NIRSpec.CLEAR',
+		# 				'JWST_NIRSpec.F110W']
+		# for ext in jwst_nirspec:
+		# 	f = ascii.read(f'/Users/guidorb/Dropbox/Postdoc/filters/{ext}')
+		# 	lam_cent, _, _ = get_filter_info(ext, output_unit='mu')
+		# 	if (lam_cent < ax.set_xlim()[0]) | (lam_cent > ax.set_xlim()[1]):
+		# 		continue
+		# 	f['col1'] = f['col1'] / 10000.
+		# 	f['col2'] = ((f['col2'] / np.nanmax(f['col2'])) * (ax.set_ylim()[0] + ((ax.set_ylim()[1] - ax.set_ylim()[0]) * 0.475))) + ax.set_ylim()[0]
+		# 	ax.plot(f['col1'], f['col2'], color='lightseagreen', linewidth=1.25)
+		# 	filtname = ext.split('.')[-1]
+		# 	ax.text(np.mean(f['col1']), np.max(f['col2']+0.2), s=filtname, color='lightseagreen', fontsize=10, ha='center')
+		# ax.plot(f['col1'], f['col2'], color='lightseagreen', linewidth=1.25, label='JWST/NIRSpec')
+		
+		ax.plot([0.6,3.3], [1.,1.], color='steelblue', linewidth=1.5, linestyle='--') # medium gratings
+		ax.plot([0.7,1.27], [1.,1.], color='steelblue', linewidth=1.5, linestyle='-') # medium gratings
+
+		ax.plot([0.9, 3.3], [1.2,1.2], color='steelblue', linewidth=1.5, linestyle='--') # medium gratings
+		ax.plot([0.97,1.89], [1.2,1.2], color='steelblue', linewidth=1.5, linestyle='-') # medium gratings
+
+		ax.plot([1.5, 5.3], [1.3,1.3], color='steelblue', linewidth=1.5, linestyle='--') # medium gratings
+		ax.plot([1.66,3.17], [1.3,1.3], color='steelblue', linewidth=1.5, linestyle='-') # medium gratings
+
+		ax.plot([2.6, 5.6], [1.4,1.4], color='steelblue', linewidth=1.5, linestyle='--') # medium gratings
+		ax.plot([2.87,5.27], [1.4,1.4], color='steelblue', linewidth=1.5, linestyle='-') # medium gratings
+
+		ax.plot([0.5,5.6], [1.8,1.8], color='lightseagreen', linewidth=1.5, linestyle='--')
 		ax.plot([0.6,5.3], [1.8,1.8], color='lightseagreen', linewidth=1.5, linestyle='--')
 		
 		ax.text(np.mean(ax.set_xlim()), 1.45, s='NIRSpec grating', color='steelblue', va='bottom', ha='center', fontsize=10)
