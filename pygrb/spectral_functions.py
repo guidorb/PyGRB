@@ -858,6 +858,7 @@ class LineFitting:
 		dlam_pix  = float(np.median(np.diff(lam)))
 		sigma_lam = dlam_pix
 		_N_WING   = 30   # half-window in pixels around the Hb–[OIII] complex
+		_N_MASK   = 5    # pixels on each side of each line to exclude from continuum fit
 
 		# Redshift range: spectrum coverage with no artificial upper cap
 		z_lo_spec = max(0.02, lam.min() / _LAM_OIII2 - 1.)
@@ -898,9 +899,16 @@ class LineFitting:
 			G_oiii = np.exp(-0.5 * ((lw - lz_oiii2) / sigma_lam)**2) + \
 			         (1. / 3.) * np.exp(-0.5 * ((lw - lz_oiii1) / sigma_lam)**2)
 
-			# Continuum-only model (WLS)
+			# Continuum-only model (WLS): exclude pixels near any line to avoid
+			# emission contaminating the baseline estimate
+			mask_cont = (np.abs(lw - lz_hb)    > _N_MASK * dlam_pix) & \
+			            (np.abs(lw - lz_oiii1)  > _N_MASK * dlam_pix) & \
+			            (np.abs(lw - lz_oiii2)  > _N_MASK * dlam_pix)
+			if mask_cont.sum() < 4:
+				mask_cont = np.ones(n, dtype=bool)
 			A_c   = np.column_stack([np.ones(n), lw_c])
-			p_c   = np.linalg.lstsq(A_c * sw[:, None], fw * sw, rcond=None)[0]
+			p_c   = np.linalg.lstsq(A_c[mask_cont] * sw[mask_cont, None],
+			                        fw[mask_cont]   * sw[mask_cont], rcond=None)[0]
 			resid = fw - A_c @ p_c
 			chi2_null = float(np.dot(iw, resid**2))
 
@@ -946,8 +954,14 @@ class LineFitting:
 		G_oiii_f = np.exp(-0.5 * ((lw_f - lz_oiii2) / sigma_lam)**2) + \
 		           (1. / 3.) * np.exp(-0.5 * ((lw_f - lz_oiii1) / sigma_lam)**2)
 
+		mask_cont_f = (np.abs(lw_f - lz_hb)    > _N_MASK * dlam_pix) & \
+		              (np.abs(lw_f - lz_oiii1)  > _N_MASK * dlam_pix) & \
+		              (np.abs(lw_f - lz_oiii2)  > _N_MASK * dlam_pix)
+		if mask_cont_f.sum() < 4:
+			mask_cont_f = np.ones(nf, dtype=bool)
 		A_c_f    = np.column_stack([np.ones(nf), lw_fc])
-		p_c_f    = np.linalg.lstsq(A_c_f * sw_f[:, None], fw_f * sw_f, rcond=None)[0]
+		p_c_f    = np.linalg.lstsq(A_c_f[mask_cont_f] * sw_f[mask_cont_f, None],
+		                           fw_f[mask_cont_f]   * sw_f[mask_cont_f], rcond=None)[0]
 		resid_f  = fw_f - A_c_f @ p_c_f
 		cont_f   = A_c_f @ p_c_f
 
